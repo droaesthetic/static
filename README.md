@@ -1,6 +1,6 @@
-# Dro Tunes
+# ـ٨ﮩﮩـ٨ﮩ 𝕊𝕥𝕒𝕥𝕚𝕔 ﮩ٨ـﮩﮩ٨ـ
 
-Dro Tunes is a Discord music bot starter with:
+ـ٨ﮩﮩـ٨ﮩ 𝕊𝕥𝕒𝕥𝕚𝕔 ﮩ٨ـﮩﮩ٨ـ is a Discord music bot starter with:
 
 - Discord slash commands
 - optional prefixed text commands
@@ -12,7 +12,8 @@ Dro Tunes is a Discord music bot starter with:
 ## What "supports these links" means
 
 - YouTube and SoundCloud links can be streamed directly.
-- Spotify links are resolved to track metadata, then matched to a playable audio source.
+- Spotify track links are resolved to track metadata, then matched to a playable audio source.
+- Spotify playlist links can be expanded through the Spotify Web API when `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are set in `.env`.
 - Deezer, Apple Music, Suno, and Amazon Music links are parsed for metadata and then matched to a playable source.
 
 That approach keeps the bot practical while avoiding brittle direct streaming integrations for providers that do not expose stable public audio streams.
@@ -69,6 +70,7 @@ To keep it working, your PC needs to stay on and connected to the internet.
 - queue cleanup commands: remove absent, remove duplicates, remove last, mass remove, clear
 - playback controls: previous, skip to, fast forward, rewind, volume
 - optional prefixed commands using the stored guild prefix
+- timed cleanup for command messages and public command replies
 
 ## Slash commands
 
@@ -137,6 +139,21 @@ For local-only use, keep:
 
 ```env
 DASHBOARD_PUBLIC_URL=http://localhost:3000
+```
+
+To auto-delete command chatter after a delay, set:
+
+```env
+CHAT_COMMAND_DELETE_AFTER_SECONDS=30
+```
+
+Set it to `0` if you want to disable that cleanup entirely.
+
+To expand Spotify playlist links through `/play query`, create a Spotify app in the Spotify Developer Dashboard and set:
+
+```env
+SPOTIFY_CLIENT_ID=your-spotify-client-id
+SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 ```
 
 ## Old Render Notes

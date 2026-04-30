@@ -11,13 +11,16 @@ const schema = z.object({
   LAVALINK_URL: z.string().default(""),
   LAVALINK_PASSWORD: z.string().default(""),
   LAVALINK_SECURE: z.coerce.boolean().default(false),
+  SPOTIFY_CLIENT_ID: z.string().default(""),
+  SPOTIFY_CLIENT_SECRET: z.string().default(""),
   PORT: z.coerce.number().optional(),
   DASHBOARD_PORT: z.coerce.number().optional(),
   DASHBOARD_PUBLIC_URL: z.string().url().default("http://localhost:3000"),
   DASHBOARD_AUTH_TOKEN: z.string().min(16),
   BOT_OWNERS: z.string().default(""),
   DEFAULT_VOLUME: z.coerce.number().min(1).max(150).default(75),
-  MAX_QUEUE_SIZE: z.coerce.number().min(1).max(500).default(100)
+  MAX_QUEUE_SIZE: z.coerce.number().min(1).max(500).default(100),
+  CHAT_COMMAND_DELETE_AFTER_SECONDS: z.coerce.number().min(0).max(3600).default(30)
 });
 
 const parsed = schema.parse(process.env);
@@ -32,10 +35,15 @@ export const appConfig = {
     auth: parsed.LAVALINK_PASSWORD,
     secure: parsed.LAVALINK_SECURE
   } : null,
+  spotify: parsed.SPOTIFY_CLIENT_ID && parsed.SPOTIFY_CLIENT_SECRET ? {
+    clientId: parsed.SPOTIFY_CLIENT_ID,
+    clientSecret: parsed.SPOTIFY_CLIENT_SECRET
+  } : null,
   dashboardPort: parsed.PORT ?? parsed.DASHBOARD_PORT ?? 3000,
   dashboardPublicUrl: parsed.DASHBOARD_PUBLIC_URL,
   dashboardAuthToken: parsed.DASHBOARD_AUTH_TOKEN,
   botOwners: parsed.BOT_OWNERS.split(",").map((value) => value.trim()).filter(Boolean),
   defaultVolume: parsed.DEFAULT_VOLUME,
-  maxQueueSize: parsed.MAX_QUEUE_SIZE
+  maxQueueSize: parsed.MAX_QUEUE_SIZE,
+  chatCommandDeleteAfterSeconds: parsed.CHAT_COMMAND_DELETE_AFTER_SECONDS
 };

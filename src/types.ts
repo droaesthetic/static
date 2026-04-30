@@ -6,9 +6,17 @@ export type Provider =
   | "apple_music"
   | "suno"
   | "amazon_music"
+  | "upload"
   | "search";
 
 export type PermissionMode = "everyone" | "dj" | "admins";
+export type FilterPreset = "off" | "bassboost" | "nightcore" | "vaporwave" | "karaoke" | "trebleboost" | "8d";
+export type MemberPermissionOverride = "allow" | "deny";
+
+export interface ChannelSettings {
+  commandsEnabled?: boolean;
+  botMessagesEnabled?: boolean;
+}
 
 export interface ResolvedTrack {
   id: string;
@@ -20,7 +28,7 @@ export interface ResolvedTrack {
   requestedBy: string;
   requestedById: string;
   sourceProvider: Provider;
-  playbackProvider: "youtube" | "soundcloud";
+  playbackProvider: "youtube" | "soundcloud" | "upload";
   playbackUrl: string;
   encodedTrack?: string;
   addedAt: string;
@@ -33,6 +41,19 @@ export interface GuildSettings {
   voteSkipEnabled: boolean;
   permissionMode: PermissionMode;
   djRoleId?: string;
+  disabledCommands: string[];
+  channelSettings: Record<string, ChannelSettings>;
+  memberPermissions: Record<string, MemberPermissionOverride>;
+  maxSongLengthSeconds?: number;
+  maxPlaylistLength?: number;
+}
+
+export interface SearchResult {
+  title: string;
+  artist?: string;
+  url: string;
+  durationInSeconds?: number;
+  playbackProvider: "youtube" | "soundcloud";
 }
 
 export interface Playlist {
@@ -49,6 +70,7 @@ export interface StoredGuildPlayerState {
   voiceChannelId?: string;
   textChannelId?: string;
   volume: number;
+  filterPreset?: FilterPreset;
   current?: ResolvedTrack;
   queue: ResolvedTrack[];
   history: ResolvedTrack[];
@@ -62,6 +84,7 @@ export interface QueueSnapshot {
   isPlaying: boolean;
   isPaused: boolean;
   volume: number;
+  filterPreset: FilterPreset;
   autoplay: boolean;
   voteSkipEnabled: boolean;
   permissionMode: PermissionMode;

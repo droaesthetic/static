@@ -1,19 +1,70 @@
-import type { Guild, VoiceBasedChannel } from "discord.js";
-import type { Player } from "shoukaku";
+import type { Guild, Message, VoiceBasedChannel } from "discord.js";
+import type { MessageCreateOptions } from "discord.js";
+import type {
+  FilterOptions,
+  Player,
+  TrackEndEvent,
+  TrackExceptionEvent,
+  TrackStuckEvent,
+  WebSocketClosedEvent
+} from "shoukaku";
 import { appConfig } from "../config.js";
-import type { QueueSnapshot, ResolvedTrack, StoredGuildPlayerState } from "../types.js";
+import type { FilterPreset, QueueSnapshot, ResolvedTrack, StoredGuildPlayerState } from "../types.js";
 import type { LavalinkService } from "./lavalinkService.js";
+import { embedTextPayload } from "../bot/messageEmbeds.js";
+
+const bassBoostEqualizer = [0.35, 0.25, 0.2, 0.12, 0.05, 0, -0.03, -0.04, -0.04, -0.04, 0, 0.03, 0.05, 0.05, 0.05]
+  .map((gain, band) => ({ band, gain }));
+
+const trebleBoostEqualizer = [-0.06, -0.05, -0.04, -0.02, 0, 0.04, 0.08, 0.12, 0.14, 0.16, 0.18, 0.2, 0.22, 0.24, 0.26]
+  .map((gain, band) => ({ band, gain }));
+
+const filterPresetOptions: Record<Exclude<FilterPreset, "off">, FilterOptions> = {
+  bassboost: {
+    equalizer: bassBoostEqualizer
+  },
+  nightcore: {
+    timescale: { speed: 1.12, pitch: 1.125, rate: 1.05 }
+  },
+  vaporwave: {
+    timescale: { speed: 0.88, pitch: 0.82, rate: 1 },
+    lowPass: { smoothing: 18 }
+  },
+  karaoke: {
+    karaoke: { level: 1, monoLevel: 1, filterBand: 220, filterWidth: 100 }
+  },
+  trebleboost: {
+    equalizer: trebleBoostEqualizer
+  },
+  "8d": {
+    rotation: { rotationHz: 0.2 }
+  }
+};
 
 export class GuildPlayer {
   private readonly queue: ResolvedTrack[];
   private readonly history: ResolvedTrack[];
+  private operationChain = Promise.resolve();
   private lavalinkPlayer?: Player;
   private current?: ResolvedTrack;
   private textChannelId?: string;
   private voiceChannelId?: string;
   private isAdvancing = false;
+  private isRecoveringConnection = false;
+  private ignoreNextStoppedEvent = false;
   private isPaused = false;
   private volume: number;
+  private filterPreset: FilterPreset;
+  private playbackWatchdog?: ReturnType<typeof setInterval>;
+  private lastPlayerUpdateAt = 0;
+  private lastKnownPositionMs = 0;
+  private lastWatchdogPositionMs = 0;
+  private stagnantWatchdogTicks = 0;
+  private nowPlayingMessageId?: string;
+  private nowPlayingMessageChannelId?: string;
+  private queueEmptyMessageId?: string;
+  private queueEmptyMessageChannelId?: string;
+  private readonly canSendAnnouncements: (channelId: string) => boolean;
   private readonly onStateChange: (state: StoredGuildPlayerState | null) => Promise<void>;
   private readonly onTrackFinished: (track: ResolvedTrack) => Promise<ResolvedTrack | null>;
   private readonly resolvePlaybackTrack: (track: ResolvedTrack) => Promise<string>;
@@ -25,12 +76,14 @@ export class GuildPlayer {
     private readonly guild: Guild,
     private readonly lavalink: LavalinkService,
     options: {
+      canSendAnnouncements: (channelId: string) => boolean;
       onStateChange: (state: StoredGuildPlayerState | null) => Promise<void>;
       onTrackFinished: (track: ResolvedTrack) => Promise<ResolvedTrack | null>;
       resolvePlaybackTrack: (track: ResolvedTrack) => Promise<string>;
       restoredState?: StoredGuildPlayerState;
     }
   ) {
+    this.canSendAnnouncements = options.canSendAnnouncements;
     this.onStateChange = options.onStateChange;
     this.onTrackFinished = options.onTrackFinished;
     this.resolvePlaybackTrack = options.resolvePlaybackTrack;
@@ -40,164 +93,226 @@ export class GuildPlayer {
     this.textChannelId = options.restoredState?.textChannelId;
     this.voiceChannelId = options.restoredState?.voiceChannelId;
     this.volume = options.restoredState?.volume ?? appConfig.defaultVolume;
+    this.filterPreset = options.restoredState?.filterPreset ?? "off";
   }
 
   async connect(voiceChannel: VoiceBasedChannel, textChannelId: string) {
-    this.voiceChannelId = voiceChannel.id;
-    this.textChannelId = textChannelId;
+    return this.runExclusive(async () => {
+      const previousVoiceChannelId = this.voiceChannelId;
+      this.voiceChannelId = voiceChannel.id;
+      this.textChannelId = textChannelId;
 
-    if (!this.lavalinkPlayer || this.voiceChannelId !== voiceChannel.id) {
-      this.lavalinkPlayer = await this.lavalink.join(
-        voiceChannel.guild.id,
-        voiceChannel.id,
-        voiceChannel.guild.shardId
-      );
-      this.attachPlayerListeners(this.lavalinkPlayer);
-      await this.lavalinkPlayer.setGlobalVolume(this.volume);
-    }
+      if (!this.lavalinkPlayer || previousVoiceChannelId !== voiceChannel.id) {
+        await this.attachToVoiceChannel(voiceChannel);
+      }
 
-    await this.persist();
+      await this.persist();
+    });
   }
 
   async enqueue(track: ResolvedTrack, position?: number) {
-    if (this.queue.length >= appConfig.maxQueueSize) {
-      throw new Error(`Queue limit reached (${appConfig.maxQueueSize} tracks).`);
-    }
-
-    if (typeof position === "number" && position >= 0 && position < this.queue.length) {
-      this.queue.splice(position, 0, track);
-    } else {
-      this.queue.push(track);
-    }
-
-    await this.persist();
-
-    if (!this.current) {
-      await this.playNext();
-    }
+    return this.runExclusive(async () => {
+      await this.enqueueInternal(track, position);
+    });
   }
 
   async enqueueMany(tracks: ResolvedTrack[]) {
-    for (const track of tracks) {
-      await this.enqueue(track);
-    }
+    return this.runExclusive(async () => {
+      for (const track of tracks) {
+        await this.enqueueInternal(track);
+      }
+    });
   }
 
-  pause() {
-    this.isPaused = true;
-    void this.lavalinkPlayer?.setPaused(true);
+  async pause() {
+    return this.runExclusive(async () => {
+      this.isPaused = true;
+      await this.lavalinkPlayer?.setPaused(true);
+      await this.persist();
+    });
   }
 
-  resume() {
-    this.isPaused = false;
-    void this.lavalinkPlayer?.setPaused(false);
+  async resume() {
+    return this.runExclusive(async () => {
+      this.isPaused = false;
+      await this.lavalinkPlayer?.setPaused(false);
+      await this.persist();
+    });
   }
 
   async stop() {
-    this.queue.length = 0;
-    this.current = undefined;
-    this.isPaused = false;
+    return this.runExclusive(async () => {
+      this.queue.length = 0;
+      this.current = undefined;
+      this.isPaused = false;
+      this.ignoreNextStoppedEvent = true;
 
-    if (this.lavalinkPlayer) {
-      await this.lavalinkPlayer.stopTrack().catch(() => undefined);
-      await this.lavalink.leave(this.guild.id).catch(() => undefined);
-      this.lavalinkPlayer = undefined;
-    }
+      if (this.lavalinkPlayer) {
+        await this.lavalinkPlayer.stopTrack().catch(() => undefined);
+        await this.lavalink.leave(this.guild.id).catch(() => undefined);
+        this.lavalinkPlayer = undefined;
+      }
 
-    this.voiceChannelId = undefined;
-    await this.persist();
+      this.stopPlaybackWatchdog();
+      await this.deleteNowPlayingMessage();
+      await this.deleteQueueEmptyMessage();
+      this.voiceChannelId = undefined;
+      await this.persist();
+    });
   }
 
-  skip() {
-    void this.lavalinkPlayer?.stopTrack();
+  async skip() {
+    return this.runExclusive(async () => {
+      await this.lavalinkPlayer?.stopTrack();
+    });
   }
 
   async skipTo(index: number) {
-    if (index < 1 || index > this.queue.length) {
-      throw new Error("That queue position does not exist.");
-    }
+    return this.runExclusive(async () => {
+      if (index < 1 || index > this.queue.length) {
+        throw new Error("That queue position does not exist.");
+      }
 
-    this.queue.splice(0, index - 1);
-    await this.persist();
-    await this.lavalinkPlayer?.stopTrack();
+      this.queue.splice(0, index - 1);
+      await this.persist();
+      await this.lavalinkPlayer?.stopTrack();
+    });
   }
 
   async playPrevious() {
-    const previous = this.history.pop();
-    if (!previous) {
-      throw new Error("There is no previous track to play.");
-    }
+    return this.runExclusive(async () => {
+      const previous = this.history.pop();
+      if (!previous) {
+        throw new Error("There is no previous track to play.");
+      }
 
-    if (this.current) {
-      this.queue.unshift(this.current);
-    }
+      if (this.current) {
+        this.queue.unshift(this.current);
+      }
 
-    this.queue.unshift(previous);
-    await this.persist();
-    await this.lavalinkPlayer?.stopTrack();
+      this.queue.unshift(previous);
+      await this.persist();
+      await this.lavalinkPlayer?.stopTrack();
+    });
   }
 
   async remove(index: number) {
-    if (index < 1 || index > this.queue.length) {
-      throw new Error("That queue position does not exist.");
-    }
+    return this.runExclusive(async () => {
+      if (index < 1 || index > this.queue.length) {
+        throw new Error("That queue position does not exist.");
+      }
 
-    const [removed] = this.queue.splice(index - 1, 1);
-    await this.persist();
-    return removed;
+      const [removed] = this.queue.splice(index - 1, 1);
+      await this.persist();
+      return removed;
+    });
+  }
+
+  async move(from: number, to: number) {
+    return this.runExclusive(async () => {
+      if (from < 1 || from > this.queue.length) {
+        throw new Error("The source queue position does not exist.");
+      }
+
+      if (to < 1 || to > this.queue.length) {
+        throw new Error("The target queue position does not exist.");
+      }
+
+      const [moved] = this.queue.splice(from - 1, 1);
+      if (!moved) {
+        throw new Error("The source queue position does not exist.");
+      }
+
+      this.queue.splice(to - 1, 0, moved);
+      await this.persist();
+      return moved;
+    });
   }
 
   async removeLast() {
-    const removed = this.queue.pop();
-    await this.persist();
-    return removed;
+    return this.runExclusive(async () => {
+      const removed = this.queue.pop();
+      await this.persist();
+      return removed;
+    });
   }
 
   async removeDuplicates() {
-    const seen = new Set<string>();
-    const before = this.queue.length;
-    const filtered = this.queue.filter((track) => {
-      const key = `${track.title.toLowerCase()}::${track.artist?.toLowerCase() ?? ""}`;
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
+    return this.runExclusive(async () => {
+      const seen = new Set<string>();
+      const before = this.queue.length;
+      const filtered = this.queue.filter((track) => {
+        const key = `${track.title.toLowerCase()}::${track.artist?.toLowerCase() ?? ""}`;
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+      this.queue.splice(0, this.queue.length, ...filtered);
+      await this.persist();
+      return before - this.queue.length;
     });
-    this.queue.splice(0, this.queue.length, ...filtered);
-    await this.persist();
-    return before - this.queue.length;
   }
 
   async removeAbsentMembers(activeMemberIds: Set<string>) {
-    const before = this.queue.length;
-    const filtered = this.queue.filter((track) => activeMemberIds.has(track.requestedById));
-    this.queue.splice(0, this.queue.length, ...filtered);
-    await this.persist();
-    return before - this.queue.length;
+    return this.runExclusive(async () => {
+      const before = this.queue.length;
+      const filtered = this.queue.filter((track) => activeMemberIds.has(track.requestedById));
+      this.queue.splice(0, this.queue.length, ...filtered);
+      await this.persist();
+      return before - this.queue.length;
+    });
   }
 
   async massRemove(start: number, count: number) {
-    if (start < 1 || count < 1) {
-      throw new Error("Start and count must both be at least 1.");
-    }
+    return this.runExclusive(async () => {
+      if (start < 1 || count < 1) {
+        throw new Error("Start and count must both be at least 1.");
+      }
 
-    const removed = this.queue.splice(start - 1, count);
-    await this.persist();
-    return removed.length;
+      const removed = this.queue.splice(start - 1, count);
+      await this.persist();
+      return removed.length;
+    });
   }
 
   async clearQueue() {
-    const count = this.queue.length;
-    this.queue.length = 0;
-    await this.persist();
-    return count;
+    return this.runExclusive(async () => {
+      const count = this.queue.length;
+      this.queue.length = 0;
+      await this.persist();
+      return count;
+    });
   }
 
-  setVolume(percent: number) {
-    this.volume = Math.max(1, Math.min(150, percent));
-    void this.lavalinkPlayer?.setGlobalVolume(this.volume);
-    void this.persist();
+  async clearAnnouncements(channelId?: string) {
+    return this.runExclusive(async () => {
+      if (!channelId || this.nowPlayingMessageChannelId === channelId) {
+        await this.deleteNowPlayingMessage();
+      }
+
+      if (!channelId || this.queueEmptyMessageChannelId === channelId) {
+        await this.deleteQueueEmptyMessage();
+      }
+    });
+  }
+
+  async setVolume(percent: number) {
+    return this.runExclusive(async () => {
+      this.volume = Math.max(1, Math.min(150, percent));
+      await this.lavalinkPlayer?.setGlobalVolume(this.volume);
+      await this.persist();
+    });
+  }
+
+  async setFilterPreset(preset: FilterPreset) {
+    return this.runExclusive(async () => {
+      this.filterPreset = preset;
+      await this.applyCurrentFilterPreset();
+      await this.persist();
+      return this.filterPreset;
+    });
   }
 
   getCurrentPositionSeconds() {
@@ -205,11 +320,13 @@ export class GuildPlayer {
   }
 
   async seekTo(seconds: number) {
-    if (!this.current || !this.lavalinkPlayer) {
-      throw new Error("Nothing is playing right now.");
-    }
+    return this.runExclusive(async () => {
+      if (!this.current || !this.lavalinkPlayer) {
+        throw new Error("Nothing is playing right now.");
+      }
 
-    await this.lavalinkPlayer.seekTo(Math.max(0, seconds) * 1000);
+      await this.lavalinkPlayer.seekTo(Math.max(0, seconds) * 1000);
+    });
   }
 
   snapshot(): QueueSnapshot {
@@ -221,6 +338,7 @@ export class GuildPlayer {
       isPlaying: Boolean(this.current) && !this.isPaused,
       isPaused: this.isPaused,
       volume: this.volume,
+      filterPreset: this.filterPreset,
       autoplay: this.autoplayEnabled,
       voteSkipEnabled: this.voteSkipEnabled,
       permissionMode: this.permissionMode,
@@ -237,6 +355,7 @@ export class GuildPlayer {
       voiceChannelId: this.voiceChannelId,
       textChannelId: this.textChannelId,
       volume: this.volume,
+      filterPreset: this.filterPreset,
       current: this.current,
       queue: [...this.queue],
       history: [...this.history]
@@ -244,27 +363,66 @@ export class GuildPlayer {
   }
 
   private attachPlayerListeners(player: Player) {
-    player.removeAllListeners("end");
-    player.removeAllListeners("exception");
-    player.removeAllListeners("closed");
+    this.detachPlayerListeners(player);
 
-    player.on("end", async () => {
-      if (!this.isAdvancing) {
-        await this.playNext();
-      }
+    player.on("end", (event) => {
+      void this.runExclusive(() => this.handleTrackEnd(event)).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] failed to handle track end`, error);
+      });
     });
 
-    player.on("exception", (reason) => {
-      console.error(`[lavalink:${this.guild.id}] track exception`, reason);
+    player.on("stuck", (event) => {
+      void this.runExclusive(() => this.handleTrackStuck(event)).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] failed to handle track stuck`, error);
+      });
     });
 
-    player.on("closed", (reason) => {
-      console.error(`[lavalink:${this.guild.id}] websocket closed`, reason);
+    player.on("exception", (event) => {
+      void this.runExclusive(() => this.handleTrackException(event)).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] failed to handle track exception`, error);
+      });
+    });
+
+    player.on("closed", (event) => {
+      void this.runExclusive(() => this.handleVoiceClosed(event)).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] failed to handle websocket close`, error);
+      });
+    });
+
+    player.on("start", () => {
+      this.lastPlayerUpdateAt = Date.now();
+      this.lastKnownPositionMs = 0;
+      this.lastWatchdogPositionMs = 0;
+      this.stagnantWatchdogTicks = 0;
+    });
+
+    player.on("update", () => {
+      this.lastPlayerUpdateAt = Date.now();
+      this.lastKnownPositionMs = Math.max(this.lastKnownPositionMs, player.position);
+    });
+
+    player.on("resumed", () => {
+      console.log(`[lavalink:${this.guild.id}] player resumed by library`);
+      this.lastPlayerUpdateAt = Date.now();
     });
   }
 
-  private async playNext() {
+  private detachPlayerListeners(player: Player) {
+    player.removeAllListeners("end");
+    player.removeAllListeners("stuck");
+    player.removeAllListeners("exception");
+    player.removeAllListeners("closed");
+    player.removeAllListeners("start");
+    player.removeAllListeners("update");
+    player.removeAllListeners("resumed");
+  }
+
+  private async advancePlaybackChain() {
     const finished = this.current;
+    if (finished) {
+      await this.deleteNowPlayingMessage();
+    }
+
     if (finished) {
       this.history.push(finished);
       if (this.history.length > 25) {
@@ -280,6 +438,8 @@ export class GuildPlayer {
     if (!next) {
       this.current = undefined;
       this.isPaused = false;
+      this.stopPlaybackWatchdog();
+      await this.sendQueueEmptyMessage();
       await this.persist();
       return;
     }
@@ -287,7 +447,7 @@ export class GuildPlayer {
     await this.startTrack(next, 0);
   }
 
-  private async startTrack(track: ResolvedTrack, seekSeconds: number) {
+  private async startTrack(track: ResolvedTrack, seekSeconds: number, announceNowPlaying = true) {
     this.isAdvancing = true;
 
     try {
@@ -295,11 +455,20 @@ export class GuildPlayer {
         throw new Error("The bot is not connected to a Lavalink player.");
       }
 
+      await this.deleteQueueEmptyMessage();
       const encoded = await this.resolvePlaybackTrack(track);
       this.current = track;
       this.isPaused = false;
+      this.lastPlayerUpdateAt = Date.now();
+      this.lastKnownPositionMs = seekSeconds * 1000;
+      this.lastWatchdogPositionMs = this.lastKnownPositionMs;
+      this.stagnantWatchdogTicks = 0;
       await this.persist();
       await this.lavalink.play(this.lavalinkPlayer, encoded, this.volume, seekSeconds * 1000);
+      this.startPlaybackWatchdog();
+      if (announceNowPlaying) {
+        await this.sendNowPlayingMessage(track);
+      }
     } finally {
       this.isAdvancing = false;
     }
@@ -307,5 +476,328 @@ export class GuildPlayer {
 
   private async persist() {
     await this.onStateChange(this.serialize());
+  }
+
+  private async attachToVoiceChannel(voiceChannel: VoiceBasedChannel) {
+    if (this.lavalinkPlayer) {
+      this.detachPlayerListeners(this.lavalinkPlayer);
+    }
+
+    this.lavalinkPlayer = await this.lavalink.join(
+      voiceChannel.guild.id,
+      voiceChannel.id,
+      voiceChannel.guild.shardId
+    );
+    this.attachPlayerListeners(this.lavalinkPlayer);
+    this.lastPlayerUpdateAt = Date.now();
+    await this.lavalinkPlayer.setGlobalVolume(this.volume);
+    await this.applyCurrentFilterPreset();
+
+    if (this.isPaused) {
+      await this.lavalinkPlayer.setPaused(true);
+    }
+  }
+
+  private async handleTrackEnd(event: TrackEndEvent) {
+    console.log(
+      `[lavalink:${this.guild.id}] track ended reason=${event.reason} current=${this.current?.title ?? "none"}`
+    );
+
+    if (event.reason === "stopped" && this.ignoreNextStoppedEvent) {
+      this.ignoreNextStoppedEvent = false;
+      return;
+    }
+
+    if (this.isAdvancing || this.isRecoveringConnection) {
+      return;
+    }
+
+    if (event.reason === "replaced") {
+      return;
+    }
+
+    await this.advancePlaybackChain();
+  }
+
+  private async handleTrackStuck(event: TrackStuckEvent) {
+    console.error(`[lavalink:${this.guild.id}] track stuck`, event);
+
+    if (this.isAdvancing || this.isRecoveringConnection) {
+      return;
+    }
+
+    await this.advancePlaybackChain();
+  }
+
+  private async handleTrackException(event: TrackExceptionEvent) {
+    console.error(`[lavalink:${this.guild.id}] track exception`, event);
+
+    if (this.isAdvancing || this.isRecoveringConnection) {
+      return;
+    }
+
+    await this.advancePlaybackChain();
+  }
+
+  private async handleVoiceClosed(event: WebSocketClosedEvent) {
+    console.error(`[lavalink:${this.guild.id}] websocket closed`, event);
+
+    if (this.isRecoveringConnection || !this.current || !this.voiceChannelId) {
+      return;
+    }
+
+    await this.recoverCurrentPlayback(`websocket close code=${event.code}`);
+  }
+
+  private async recoverCurrentPlayback(reason: string) {
+    if (this.isRecoveringConnection || !this.current || !this.voiceChannelId) {
+      return;
+    }
+
+    this.isRecoveringConnection = true;
+    const resumeAtSeconds = Math.floor(Math.max(this.lastKnownPositionMs, this.lavalinkPlayer?.position ?? 0) / 1000);
+
+    try {
+      const channel = await this.guild.channels.fetch(this.voiceChannelId);
+      if (!channel?.isVoiceBased()) {
+        throw new Error("The stored voice channel no longer exists or is not voice-based.");
+      }
+
+      console.warn(
+        `[lavalink:${this.guild.id}] attempting playback recovery after ${reason} at ${resumeAtSeconds}s`
+      );
+
+      if (this.lavalinkPlayer) {
+        this.detachPlayerListeners(this.lavalinkPlayer);
+      }
+
+      await this.lavalink.leave(this.guild.id).catch(() => undefined);
+      this.lavalinkPlayer = undefined;
+      await this.attachToVoiceChannel(channel);
+
+      if (this.current) {
+        await this.startTrack(this.current, resumeAtSeconds, false);
+        console.log(
+          `[lavalink:${this.guild.id}] recovered current track at ${resumeAtSeconds}s`
+        );
+      }
+    } catch (error) {
+      console.error(`[lavalink:${this.guild.id}] recovery failed`, error);
+    } finally {
+      this.isRecoveringConnection = false;
+      await this.persist();
+    }
+  }
+
+  private startPlaybackWatchdog() {
+    this.stopPlaybackWatchdog();
+
+    this.playbackWatchdog = setInterval(() => {
+      void this.runExclusive(() => this.inspectPlaybackHealth()).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] playback watchdog failed`, error);
+      });
+    }, 15000);
+    this.playbackWatchdog.unref?.();
+  }
+
+  private stopPlaybackWatchdog() {
+    if (!this.playbackWatchdog) {
+      return;
+    }
+
+    clearInterval(this.playbackWatchdog);
+    this.playbackWatchdog = undefined;
+    this.stagnantWatchdogTicks = 0;
+  }
+
+  private async inspectPlaybackHealth() {
+    if (!this.current || this.isPaused || this.isAdvancing || this.isRecoveringConnection) {
+      return;
+    }
+
+    const player = this.lavalinkPlayer;
+    if (!player || !player.track) {
+      await this.recoverCurrentPlayback("missing Lavalink track");
+      return;
+    }
+
+    const now = Date.now();
+    const updateAgeMs = this.lastPlayerUpdateAt ? now - this.lastPlayerUpdateAt : 0;
+    if (updateAgeMs > 45000) {
+      await this.recoverCurrentPlayback(`stale player updates for ${Math.round(updateAgeMs / 1000)}s`);
+      return;
+    }
+
+    const position = player.position;
+    this.lastKnownPositionMs = Math.max(this.lastKnownPositionMs, position);
+    if (position <= this.lastWatchdogPositionMs + 500) {
+      this.stagnantWatchdogTicks += 1;
+    } else {
+      this.stagnantWatchdogTicks = 0;
+      this.lastWatchdogPositionMs = position;
+    }
+
+    if (this.stagnantWatchdogTicks >= 4) {
+      await this.recoverCurrentPlayback("stagnant playback position");
+    }
+  }
+
+  private async applyCurrentFilterPreset() {
+    if (!this.lavalinkPlayer) {
+      return;
+    }
+
+    if (this.filterPreset === "off") {
+      await this.lavalinkPlayer.clearFilters();
+      return;
+    }
+
+    await this.lavalinkPlayer.setFilters(filterPresetOptions[this.filterPreset]);
+  }
+
+  private async sendNowPlayingMessage(track: ResolvedTrack) {
+    const channel = await this.getAnnouncementChannel();
+    if (!channel) {
+      return;
+    }
+
+    await this.deleteNowPlayingMessage(channel);
+    const message = await channel.send({
+      ...embedTextPayload(
+        `**${track.title}**${track.artist ? ` by ${track.artist}` : ""}\nRequested by: ${this.formatRequester(track)}`,
+        { title: "Now Playing", tone: "success" }
+      )
+    });
+    this.nowPlayingMessageId = message.id;
+    this.nowPlayingMessageChannelId = channel.id;
+  }
+
+  private async sendQueueEmptyMessage() {
+    const channel = await this.getAnnouncementChannel();
+    if (!channel) {
+      return;
+    }
+
+    await this.deleteQueueEmptyMessage(channel);
+    const message = await channel.send({
+      ...embedTextPayload("Queue is empty.", { title: "Queue Status", tone: "warning" })
+    });
+    this.queueEmptyMessageId = message.id;
+    this.queueEmptyMessageChannelId = channel.id;
+  }
+
+  private async deleteNowPlayingMessage(channel?: Awaited<ReturnType<GuildPlayer["getAnnouncementChannel"]>>) {
+    await this.deleteTrackedMessage("nowPlayingMessageId", channel);
+  }
+
+  private async deleteQueueEmptyMessage(channel?: Awaited<ReturnType<GuildPlayer["getAnnouncementChannel"]>>) {
+    await this.deleteTrackedMessage("queueEmptyMessageId", channel);
+  }
+
+  private async deleteTrackedMessage(
+    key: "nowPlayingMessageId" | "queueEmptyMessageId",
+    existingChannel?: Awaited<ReturnType<GuildPlayer["getAnnouncementChannel"]>>
+  ) {
+    const messageId = this[key];
+    if (!messageId) {
+      return;
+    }
+
+    const channelIdKey = key === "nowPlayingMessageId" ? "nowPlayingMessageChannelId" : "queueEmptyMessageChannelId";
+    const targetChannelId = this[channelIdKey];
+    const channel = existingChannel ?? await this.getAnnouncementChannel(targetChannelId, true);
+    if (!channel) {
+      this[key] = undefined;
+      this[channelIdKey] = undefined;
+      return;
+    }
+
+    await channel.messages.delete(messageId).catch(() => undefined);
+    this[key] = undefined;
+    this[channelIdKey] = undefined;
+  }
+
+  private async getAnnouncementChannel(channelId = this.textChannelId, ignorePreferences = false) {
+    if (!channelId) {
+      return null;
+    }
+
+    if (!ignorePreferences && !this.canSendAnnouncements(channelId)) {
+      return null;
+    }
+
+    const channel = await this.guild.channels.fetch(channelId);
+    if (!channel?.isTextBased() || !("send" in channel) || !("messages" in channel)) {
+      return null;
+    }
+
+    return channel as {
+      id: string;
+      send: (options: MessageCreateOptions) => Promise<Message>;
+      messages: { delete: (messageId: string) => Promise<unknown> };
+    };
+  }
+
+  private async enqueueInternal(track: ResolvedTrack, position?: number) {
+    if (this.queue.length >= appConfig.maxQueueSize) {
+      throw new Error(`Queue limit reached (${appConfig.maxQueueSize} tracks).`);
+    }
+
+    await this.deleteQueueEmptyMessage();
+
+    if (typeof position === "number" && position >= 0 && position < this.queue.length) {
+      this.queue.splice(position, 0, track);
+    } else {
+      this.queue.push(track);
+    }
+
+    await this.persist();
+    await this.maybeContinuePlaybackChain();
+  }
+
+  private formatRequester(track: ResolvedTrack) {
+    if (track.requestedBy === "Autoplay") {
+      return "Autoplay";
+    }
+
+    return track.requestedBy || "Unknown listener";
+  }
+
+  async removeTracksByRequester(userId: string) {
+    return this.runExclusive(async () => {
+      const before = this.queue.length;
+      const filtered = this.queue.filter((track) => track.requestedById !== userId);
+      this.queue.splice(0, this.queue.length, ...filtered);
+
+      let removed = before - filtered.length;
+      const removeCurrent = this.current?.requestedById === userId;
+
+      await this.persist();
+
+      if (removeCurrent) {
+        removed += 1;
+        if (this.lavalinkPlayer) {
+          await this.lavalinkPlayer.stopTrack();
+        } else {
+          await this.advancePlaybackChain();
+        }
+      }
+
+      return removed;
+    });
+  }
+
+  private async maybeContinuePlaybackChain() {
+    if (this.current || this.isAdvancing) {
+      return;
+    }
+
+    await this.advancePlaybackChain();
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const task = this.operationChain.then(operation, operation);
+    this.operationChain = task.then(() => undefined, () => undefined);
+    return task;
   }
 }

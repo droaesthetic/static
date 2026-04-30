@@ -7,18 +7,43 @@ import type {
   VoiceBasedChannel
 } from "discord.js";
 import { ChannelType, PermissionFlagsBits } from "discord.js";
+import { randomUUID } from "node:crypto";
+import { appConfig } from "../config.js";
 import { ProviderResolver } from "./providerResolver.js";
 import { GuildPlayer } from "./guildPlayer.js";
 import { LavalinkService } from "./lavalinkService.js";
 import { StateStore } from "../storage/stateStore.js";
 import type {
+  ChannelSettings,
+  FilterPreset,
   GuildSettings,
+  MemberPermissionOverride,
   Playlist,
   QueueSnapshot,
-  ResolvedTrack
+  ResolvedTrack,
+  SearchResult
 } from "../types.js";
 
 const defaultPrefix = "!";
+
+export interface PlayResult {
+  tracks: ResolvedTrack[];
+  playlistName?: string;
+  playlistTotalTracks?: number;
+}
+
+function createDefaultGuildSettings(guildId: string): GuildSettings {
+  return {
+    guildId,
+    prefix: defaultPrefix,
+    autoplay: false,
+    voteSkipEnabled: false,
+    permissionMode: "everyone",
+    disabledCommands: [],
+    channelSettings: {},
+    memberPermissions: {}
+  };
+}
 
 export class MusicManager {
   private readonly resolver = new ProviderResolver();
@@ -40,12 +65,18 @@ export class MusicManager {
   }
 
   getGuildSettings(guildId: string): GuildSettings {
-    return this.store.getGuildSettings(guildId) ?? {
-      guildId,
-      prefix: defaultPrefix,
-      autoplay: false,
-      voteSkipEnabled: false,
-      permissionMode: "everyone"
+    const stored = this.store.getGuildSettings(guildId);
+    if (!stored) {
+      return createDefaultGuildSettings(guildId);
+    }
+
+    const defaults = createDefaultGuildSettings(guildId);
+    return {
+      ...defaults,
+      ...stored,
+      disabledCommands: [...(stored.disabledCommands ?? [])],
+      channelSettings: { ...(stored.channelSettings ?? {}) },
+      memberPermissions: { ...(stored.memberPermissions ?? {}) }
     };
   }
 
@@ -61,7 +92,125 @@ export class MusicManager {
     return next;
   }
 
+  getChannelSettings(guildId: string, channelId: string): Required<ChannelSettings> {
+    const settings = this.getGuildSettings(guildId);
+    const override = settings.channelSettings[channelId];
+    return {
+      commandsEnabled: override?.commandsEnabled ?? true,
+      botMessagesEnabled: override?.botMessagesEnabled ?? true
+    };
+  }
+
+  canSendBotMessages(guildId: string, channelId: string) {
+    return this.getChannelSettings(guildId, channelId).botMessagesEnabled;
+  }
+
+  async setChannelCommandsEnabled(guildId: string, channelId: string, enabled: boolean) {
+    const settings = this.getGuildSettings(guildId);
+    const channelSettings = { ...settings.channelSettings };
+    const next: ChannelSettings = {
+      ...(channelSettings[channelId] ?? {}),
+      commandsEnabled: enabled
+    };
+
+    if (next.commandsEnabled !== false && next.botMessagesEnabled !== false) {
+      delete channelSettings[channelId];
+    } else {
+      channelSettings[channelId] = next;
+    }
+
+    return this.updateGuildSettings(guildId, { channelSettings });
+  }
+
+  async setChannelBotMessagesEnabled(guildId: string, channelId: string, enabled: boolean) {
+    const settings = this.getGuildSettings(guildId);
+    const channelSettings = { ...settings.channelSettings };
+    const next: ChannelSettings = {
+      ...(channelSettings[channelId] ?? {}),
+      botMessagesEnabled: enabled
+    };
+
+    if (next.commandsEnabled !== false && next.botMessagesEnabled !== false) {
+      delete channelSettings[channelId];
+    } else {
+      channelSettings[channelId] = next;
+    }
+
+    const updated = await this.updateGuildSettings(guildId, { channelSettings });
+    if (!enabled) {
+      await this.players.get(guildId)?.clearAnnouncements(channelId);
+    }
+    return updated;
+  }
+
+  async setCommandEnabled(guildId: string, commandName: string, enabled: boolean) {
+    const settings = this.getGuildSettings(guildId);
+    const normalizedName = commandName.toLowerCase();
+    const disabledCommands = new Set(settings.disabledCommands.map((entry) => entry.toLowerCase()));
+
+    if (enabled) {
+      disabledCommands.delete(normalizedName);
+    } else {
+      disabledCommands.add(normalizedName);
+    }
+
+    return this.updateGuildSettings(guildId, {
+      disabledCommands: [...disabledCommands].sort((left, right) => left.localeCompare(right))
+    });
+  }
+
+  async setMemberPermissionOverride(guildId: string, memberId: string, override?: MemberPermissionOverride) {
+    const settings = this.getGuildSettings(guildId);
+    const memberPermissions = { ...settings.memberPermissions };
+    if (override) {
+      memberPermissions[memberId] = override;
+    } else {
+      delete memberPermissions[memberId];
+    }
+
+    return this.updateGuildSettings(guildId, { memberPermissions });
+  }
+
   async play(interaction: ChatInputCommandInteraction, query: string) {
+    const guild = interaction.guild;
+    if (!guild) {
+      throw new Error("This command can only be used in a server.");
+    }
+
+    const member = await guild.members.fetch(interaction.user.id);
+    const voiceChannel = member.voice.channel;
+
+    if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+      throw new Error("Join a voice channel first.");
+    }
+
+    await this.assertCanControl(member, guild.id);
+
+    const player = await this.ensurePlayer(guild, voiceChannel, interaction.channelId);
+    const playlistResult = await this.resolvePlaylistLink(
+      query,
+      guild.id,
+      interaction.user.username,
+      interaction.user.id,
+      player.snapshot().upcoming.length
+    );
+    if (playlistResult) {
+      await player.enqueueMany(playlistResult.tracks);
+      return playlistResult;
+    }
+
+    const track = await this.resolver.resolve({
+      query,
+      requestedBy: interaction.user.username,
+      requestedById: interaction.user.id
+    });
+    this.assertTrackWithinLimit(guild.id, track);
+
+    await player.enqueue(track);
+    return { tracks: [track] };
+  }
+
+  async insert(interaction: ChatInputCommandInteraction, query: string) {
     const guild = interaction.guild;
     if (!guild) {
       throw new Error("This command can only be used in a server.");
@@ -82,8 +231,9 @@ export class MusicManager {
       requestedBy: interaction.user.username,
       requestedById: interaction.user.id
     });
+    this.assertTrackWithinLimit(guild.id, track);
 
-    await player.enqueue(track);
+    await player.enqueue(track, 0);
     return track;
   }
 
@@ -105,10 +255,28 @@ export class MusicManager {
     return voiceChannel;
   }
 
+  async joinFromMessage(message: Message) {
+    const guild = message.guild;
+    if (!guild) {
+      throw new Error("This command can only be used in a server.");
+    }
+
+    const member = await guild.members.fetch(message.author.id);
+    const voiceChannel = member.voice.channel;
+
+    if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+      throw new Error("Join a voice channel first.");
+    }
+
+    await this.assertCanControl(member, guild.id);
+    await this.ensurePlayer(guild, voiceChannel, message.channelId);
+    return voiceChannel;
+  }
+
   async playMany(interaction: ChatInputCommandInteraction, queries: string[]) {
     const tracks: ResolvedTrack[] = [];
     for (const query of queries) {
-      tracks.push(await this.play(interaction, query));
+      tracks.push(...(await this.play(interaction, query)).tracks);
     }
     return tracks;
   }
@@ -134,17 +302,174 @@ export class MusicManager {
       requestedBy: message.author.username,
       requestedById: message.author.id
     });
+    this.assertTrackWithinLimit(guild.id, track);
 
     await player.enqueue(track);
     return track;
   }
 
+  async insertFromMessage(message: Message, query: string) {
+    const guild = message.guild;
+    if (!guild) {
+      throw new Error("This command can only be used in a server.");
+    }
+
+    const member = await guild.members.fetch(message.author.id);
+    const voiceChannel = member.voice.channel;
+
+    if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+      throw new Error("Join a voice channel first.");
+    }
+
+    await this.assertCanControl(member, guild.id);
+
+    const player = await this.ensurePlayer(guild, voiceChannel, message.channelId);
+    const track = await this.resolver.resolve({
+      query,
+      requestedBy: message.author.username,
+      requestedById: message.author.id
+    });
+    this.assertTrackWithinLimit(guild.id, track);
+
+    await player.enqueue(track, 0);
+    return track;
+  }
+
+  async search(query: string, limit = 5): Promise<SearchResult[]> {
+    return this.resolver.search(query, limit);
+  }
+
+  private async resolvePlaylistLink(
+    query: string,
+    guildId: string,
+    requestedBy: string,
+    requestedById: string,
+    currentQueueLength: number
+  ): Promise<PlayResult | null> {
+    if (!this.isPlaylistUrl(query)) {
+      return null;
+    }
+
+    const loadLimit = this.getExternalPlaylistLoadLimit(guildId, currentQueueLength);
+    if (loadLimit < 1) {
+      throw new Error(`Queue limit reached (${appConfig.maxQueueSize} tracks).`);
+    }
+
+    if (this.isSpotifyPlaylistUrl(query)) {
+      const playlist = await this.resolver.resolveSpotifyPlaylist({
+        url: query,
+        requestedBy,
+        requestedById,
+        maxTracks: loadLimit
+      });
+      return {
+        tracks: playlist.tracks,
+        playlistName: playlist.name,
+        playlistTotalTracks: playlist.totalTracks
+      };
+    }
+
+    if (!this.isLavalinkSupportedPlaylistUrl(query)) {
+      throw new Error(
+        "That playlist provider is not configured for playlist expansion yet. Spotify, YouTube playlists, and SoundCloud sets can be queued with `/play query` right now."
+      );
+    }
+
+    const playlist = await this.lavalink.resolvePlaylist(query);
+    const playlistTracks = playlist.tracks.slice(0, loadLimit);
+    this.assertPlaylistWithinLimit(guildId, playlistTracks.length);
+
+    const tracks = playlistTracks.map((track) => {
+      const durationInSeconds = Math.floor(track.info.length / 1000) || undefined;
+      const sourceUrl = track.info.uri ?? query;
+      const sourceProvider = this.resolver.detectProvider(sourceUrl);
+      const resolved: ResolvedTrack = {
+        id: randomUUID(),
+        title: track.info.title || "Unknown title",
+        artist: track.info.author,
+        url: sourceUrl,
+        artwork: "artworkUrl" in track.info ? track.info.artworkUrl : undefined,
+        durationInSeconds,
+        requestedBy,
+        requestedById,
+        sourceProvider,
+        playbackProvider: sourceProvider === "soundcloud" ? "soundcloud" : "youtube",
+        playbackUrl: sourceUrl,
+        encodedTrack: track.encoded,
+        addedAt: new Date().toISOString()
+      };
+      this.assertTrackWithinLimit(guildId, resolved, `The playlist track **${resolved.title}**`);
+      return resolved;
+    });
+
+    return { tracks, playlistName: playlist.name, playlistTotalTracks: playlist.tracks.length };
+  }
+
+  private isPlaylistUrl(query: string) {
+    const url = this.parseHttpUrl(query);
+    if (!url) {
+      return false;
+    }
+
+    const host = url.hostname.toLowerCase();
+    return (
+      (host.includes("youtube.com") && url.searchParams.has("list"))
+      || (host === "youtu.be" && url.searchParams.has("list"))
+      || (host.includes("soundcloud.com") && /\/sets\//i.test(url.pathname))
+      || (host.includes("spotify.com") && /\/playlist\//i.test(url.pathname))
+      || (host.includes("deezer.com") && /\/playlist\//i.test(url.pathname))
+      || (host.includes("music.apple.com") && /\/playlist\//i.test(url.pathname))
+      || (host.includes("music.amazon.") && /\/playlists\//i.test(url.pathname))
+    );
+  }
+
+  private isSpotifyPlaylistUrl(query: string) {
+    const url = this.parseHttpUrl(query);
+    if (!url) {
+      return false;
+    }
+
+    return url.hostname.toLowerCase().includes("spotify.com") && /\/playlist\//i.test(url.pathname);
+  }
+
+  private isLavalinkSupportedPlaylistUrl(query: string) {
+    const url = this.parseHttpUrl(query);
+    if (!url) {
+      return false;
+    }
+
+    const host = url.hostname.toLowerCase();
+    return (
+      (host.includes("youtube.com") && url.searchParams.has("list"))
+      || (host === "youtu.be" && url.searchParams.has("list"))
+      || (host.includes("soundcloud.com") && /\/sets\//i.test(url.pathname))
+    );
+  }
+
+  private parseHttpUrl(query: string) {
+    if (!/^https?:\/\//i.test(query)) {
+      return undefined;
+    }
+
+    try {
+      return new URL(query);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getExternalPlaylistLoadLimit(guildId: string, currentQueueLength: number) {
+    const queueRoom = Math.max(0, appConfig.maxQueueSize - currentQueueLength);
+    const guildLimit = this.getGuildSettings(guildId).maxPlaylistLength ?? appConfig.maxQueueSize;
+    return Math.min(queueRoom, guildLimit, appConfig.maxQueueSize);
+  }
+
   async pause(guildId: string) {
-    this.getPlayerOrThrow(guildId).pause();
+    await this.getPlayerOrThrow(guildId).pause();
   }
 
   async resume(guildId: string) {
-    this.getPlayerOrThrow(guildId).resume();
+    await this.getPlayerOrThrow(guildId).resume();
   }
 
   async stop(guildId: string) {
@@ -153,7 +478,7 @@ export class MusicManager {
   }
 
   async skip(guildId: string) {
-    this.getPlayerOrThrow(guildId).skip();
+    await this.getPlayerOrThrow(guildId).skip();
     this.voteSkipVoters.delete(guildId);
   }
 
@@ -167,11 +492,23 @@ export class MusicManager {
   }
 
   async setVolume(guildId: string, percent: number) {
-    this.getPlayerOrThrow(guildId).setVolume(percent);
+    await this.getPlayerOrThrow(guildId).setVolume(percent);
+  }
+
+  async setFilterPreset(guildId: string, preset: FilterPreset) {
+    return this.getPlayerOrThrow(guildId).setFilterPreset(preset);
   }
 
   async remove(guildId: string, index: number) {
     return this.getPlayerOrThrow(guildId).remove(index);
+  }
+
+  async removeByUser(guildId: string, userId: string) {
+    return this.getPlayerOrThrow(guildId).removeTracksByRequester(userId);
+  }
+
+  async move(guildId: string, from: number, to: number) {
+    return this.getPlayerOrThrow(guildId).move(from, to);
   }
 
   async removeLast(guildId: string) {
@@ -274,12 +611,14 @@ export class MusicManager {
 
   async createOrReplacePlaylist(guildId: string, name: string, createdById: string) {
     const snapshot = this.getSnapshot(guildId);
+    const tracks = [snapshot.current, ...snapshot.upcoming].filter(Boolean) as ResolvedTrack[];
+    this.assertPlaylistWithinLimit(guildId, tracks.length);
     const playlist: Playlist = {
       name,
       createdById,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      tracks: [snapshot.current, ...snapshot.upcoming].filter(Boolean) as ResolvedTrack[]
+      tracks
     };
     await this.store.setPlaylist(guildId, playlist);
     return playlist;
@@ -300,6 +639,7 @@ export class MusicManager {
       tracks: []
     };
 
+    this.assertPlaylistWithinLimit(guildId, playlist.tracks.length + 1);
     playlist.tracks.push(snapshot.current);
     playlist.updatedAt = new Date().toISOString();
     await this.store.setPlaylist(guildId, playlist);
@@ -315,6 +655,10 @@ export class MusicManager {
     const playlist = this.store.getPlaylist(guildId, name);
     if (!playlist) {
       throw new Error("That playlist does not exist.");
+    }
+    this.assertPlaylistWithinLimit(guildId, playlist.tracks.length);
+    for (const track of playlist.tracks) {
+      this.assertTrackWithinLimit(guildId, track, `The playlist track **${track.title}**`);
     }
 
     const guild = interaction.guild;
@@ -341,12 +685,51 @@ export class MusicManager {
     return playlist.tracks.length;
   }
 
+  async loadPlaylistFromMessage(message: Message, name: string) {
+    const guild = message.guild;
+    if (!guild) {
+      throw new Error("This command must be used in a server.");
+    }
+
+    const playlist = this.store.getPlaylist(guild.id, name);
+    if (!playlist) {
+      throw new Error("That playlist does not exist.");
+    }
+
+    this.assertPlaylistWithinLimit(guild.id, playlist.tracks.length);
+    for (const track of playlist.tracks) {
+      this.assertTrackWithinLimit(guild.id, track, `The playlist track **${track.title}**`);
+    }
+
+    const member = await guild.members.fetch(message.author.id);
+    const voiceChannel = member.voice.channel;
+    if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+      throw new Error("Join a voice channel first.");
+    }
+
+    await this.assertCanControl(member, guild.id);
+    const player = await this.ensurePlayer(guild, voiceChannel, message.channelId);
+    await player.enqueueMany(playlist.tracks.map((track) => ({
+      ...track,
+      id: `${track.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      addedAt: new Date().toISOString(),
+      requestedBy: message.author.username,
+      requestedById: message.author.id
+    })));
+
+    return playlist.tracks.length;
+  }
+
   listPlaylists(guildId: string) {
     return this.store.getPlaylists(guildId);
   }
 
   async deletePlaylist(guildId: string, name: string) {
     await this.store.deletePlaylist(guildId, name);
+  }
+
+  getCurrentTrack(guildId: string) {
+    return this.getSnapshot(guildId).current;
   }
 
   getSnapshot(guildId: string): QueueSnapshot {
@@ -365,6 +748,7 @@ export class MusicManager {
       isPlaying: false,
       isPaused: false,
       volume: persisted?.volume ?? 75,
+      filterPreset: persisted?.filterPreset ?? "off",
       autoplay: settings.autoplay,
       voteSkipEnabled: settings.voteSkipEnabled,
       permissionMode: settings.permissionMode,
@@ -387,9 +771,30 @@ export class MusicManager {
     return snapshots;
   }
 
+  isBotOwnerId(userId: string) {
+    return appConfig.botOwners.includes(userId);
+  }
+
+  async assertBotOwner(member: GuildMember) {
+    if (this.isBotOwnerId(member.id)) {
+      return;
+    }
+
+    throw new Error("Only configured bot owners can use that command.");
+  }
+
   async assertCanControl(member: GuildMember, guildId: string) {
     const settings = this.getGuildSettings(guildId);
-    if (member.permissions.has(PermissionFlagsBits.Administrator) || member.guild.ownerId === member.id) {
+    if (this.isModerator(member)) {
+      return;
+    }
+
+    const override = settings.memberPermissions[member.id];
+    if (override === "deny") {
+      throw new Error("You are not allowed to control this bot in this server.");
+    }
+
+    if (override === "allow") {
       return;
     }
 
@@ -411,11 +816,39 @@ export class MusicManager {
     throw new Error("You need the configured DJ role to run that command.");
   }
 
+  async assertCanUseCommand(member: GuildMember, guildId: string, commandName: string, channelId: string) {
+    if (this.isModerator(member)) {
+      return;
+    }
+
+    const settings = this.getGuildSettings(guildId);
+    if (settings.memberPermissions[member.id] === "deny") {
+      throw new Error("You are not allowed to use this bot in this server.");
+    }
+
+    if (settings.disabledCommands.includes(commandName.toLowerCase())) {
+      throw new Error(`The \`${commandName}\` command is disabled in this server.`);
+    }
+
+    if (!this.getChannelSettings(guildId, channelId).commandsEnabled) {
+      throw new Error("Bot commands are disabled in this channel.");
+    }
+  }
+
+  async assertCanModerate(member: GuildMember) {
+    if (this.isModerator(member)) {
+      return;
+    }
+
+    throw new Error("You need moderator permissions to update bot settings.");
+  }
+
   private async ensurePlayer(guild: Guild, voiceChannel: VoiceBasedChannel, textChannelId: string) {
     let player = this.players.get(guild.id);
     if (!player) {
       player = new GuildPlayer(guild, this.lavalink, {
         restoredState: this.store.getGuildPlayer(guild.id),
+        canSendAnnouncements: (channelId) => this.canSendBotMessages(guild.id, channelId),
         onStateChange: async (state) => {
           if (state) {
             await this.store.setGuildPlayer(state);
@@ -429,12 +862,26 @@ export class MusicManager {
             return null;
           }
 
-          const seed = [track.artist, track.title].filter(Boolean).join(" - ");
-          return this.resolver.resolve({
-            query: `${seed} audio`,
-            requestedBy: "Autoplay",
-            requestedById: this.client.user?.id ?? "autoplay"
-          });
+          try {
+            const persistedState = this.store.getGuildPlayer(guild.id);
+            const recentTracks = [
+              ...(persistedState?.history ?? []).slice(-8),
+              ...(persistedState?.current ? [persistedState.current] : []),
+              ...this.getSnapshot(guild.id).upcoming.slice(0, 8)
+            ];
+
+            const resolved = await this.resolver.resolveAutoplay({
+              seedTrack: track,
+              recentTracks,
+              requestedBy: "Autoplay",
+              requestedById: this.client.user?.id ?? "autoplay"
+            });
+            this.assertTrackWithinLimit(guild.id, resolved, `Autoplay picked **${resolved.title}**`);
+            return resolved;
+          } catch (error) {
+            console.warn(`[autoplay:${guild.id}] failed to resolve a follow-up track`, error);
+            return null;
+          }
         },
         resolvePlaybackTrack: async (track) => {
           if (track.encodedTrack) {
@@ -468,5 +915,35 @@ export class MusicManager {
     }
 
     return player;
+  }
+
+  private isModerator(member: GuildMember) {
+    return this.isBotOwnerId(member.id)
+      || member.guild.ownerId === member.id
+      || member.permissions.has(PermissionFlagsBits.Administrator)
+      || member.permissions.has(PermissionFlagsBits.ManageGuild)
+      || member.permissions.has(PermissionFlagsBits.ManageChannels);
+  }
+
+  private assertTrackWithinLimit(guildId: string, track: ResolvedTrack, label = `**${track.title}**`) {
+    const maxSongLengthSeconds = this.getGuildSettings(guildId).maxSongLengthSeconds;
+    if (!maxSongLengthSeconds || !track.durationInSeconds) {
+      return;
+    }
+
+    if (track.durationInSeconds > maxSongLengthSeconds) {
+      throw new Error(`${label} is too long for this server (${track.durationInSeconds}s > ${maxSongLengthSeconds}s).`);
+    }
+  }
+
+  private assertPlaylistWithinLimit(guildId: string, trackCount: number) {
+    const maxPlaylistLength = this.getGuildSettings(guildId).maxPlaylistLength;
+    if (!maxPlaylistLength) {
+      return;
+    }
+
+    if (trackCount > maxPlaylistLength) {
+      throw new Error(`That playlist is too large for this server (${trackCount} tracks > ${maxPlaylistLength}).`);
+    }
   }
 }

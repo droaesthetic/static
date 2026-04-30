@@ -14,6 +14,7 @@ const defaultState: AppState = {
 export class StateStore {
   private state: AppState = structuredClone(defaultState);
   private ready = false;
+  private flushChain = Promise.resolve();
 
   async init() {
     if (this.ready) {
@@ -80,6 +81,12 @@ export class StateStore {
   }
 
   private async flush() {
-    await writeFile(statePath, JSON.stringify(this.state, null, 2), "utf8");
+    const payload = JSON.stringify(this.state, null, 2);
+    const writeTask = this.flushChain.then(
+      () => writeFile(statePath, payload, "utf8"),
+      () => writeFile(statePath, payload, "utf8")
+    );
+    this.flushChain = writeTask.then(() => undefined, () => undefined);
+    await writeTask;
   }
 }

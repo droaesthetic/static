@@ -27,7 +27,20 @@ $port = Get-NextFreePort
 $env:DASHBOARD_PORT = "$port"
 $env:DASHBOARD_PUBLIC_URL = "http://localhost:$port"
 
-Write-Host "Starting Dro Tunes locally..." -ForegroundColor Green
+Write-Host "Starting ـ٨ﮩﮩـ٨ﮩ 𝕊𝕥𝕒𝕥𝕚𝕔 ﮩ٨ـﮩﮩ٨ـ locally..." -ForegroundColor Green
 Write-Host "Dashboard: http://localhost:$port" -ForegroundColor Cyan
 
-& "C:\Program Files\nodejs\npm.cmd" run dev:local
+$restartDelaySeconds = 5
+
+while ($true) {
+  & "C:\Program Files\nodejs\npm.cmd" run dev:local
+  $exitCode = $LASTEXITCODE
+
+  if ($exitCode -eq 0) {
+    Write-Host "Bot stopped cleanly." -ForegroundColor Yellow
+    break
+  }
+
+  Write-Host "Bot exited with code $exitCode. Restarting in $restartDelaySeconds seconds..." -ForegroundColor Yellow
+  Start-Sleep -Seconds $restartDelaySeconds
+}

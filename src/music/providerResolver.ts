@@ -109,6 +109,8 @@ const directMediaExtensions = new Set([
   "mkv"
 ]);
 
+const vevoRejectedMessage = "VEVO links are not supported by this bot. Try a non-VEVO YouTube upload, SoundCloud link, or search query instead.";
+
 export class ProviderResolver {
   private soundCloudSearchEnabled = true;
   private spotifyAccessToken?: { value: string; expiresAt: number };
@@ -120,6 +122,10 @@ export class ProviderResolver {
     }
 
     const isUrl = /^https?:\/\//i.test(normalizedQuery);
+
+    if (isUrl && this.isVevoUrl(normalizedQuery)) {
+      this.rejectVevoLink();
+    }
 
     if (isUrl && this.isDirectMediaUrl(normalizedQuery)) {
       return this.resolveDirectMediaUrl(normalizedQuery, requestedBy, requestedById);
@@ -180,6 +186,10 @@ export class ProviderResolver {
       .map((video) => {
         const url = this.buildYouTubePlaybackUrl(video.url, "id" in video ? video.id : undefined);
         if (!url) {
+          return null;
+        }
+
+        if (this.isVevoMetadata({ title: video.title, artist: video.channel?.name, url })) {
           return null;
         }
 
@@ -329,10 +339,17 @@ export class ProviderResolver {
 
   private async resolveYouTube(url: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
     const video = await play.video_info(url);
+    const title = video.video_details.title ?? "Unknown title";
+    const artist = video.video_details.channel?.name;
+
+    if (this.isVevoMetadata({ title, artist, url })) {
+      this.rejectVevoLink();
+    }
+
     return {
       id: randomUUID(),
-      title: video.video_details.title ?? "Unknown title",
-      artist: video.video_details.channel?.name,
+      title,
+      artist,
       url,
       artwork: video.video_details.thumbnails?.at(-1)?.url,
       durationInSeconds: Number(video.video_details.durationInSec) || undefined,
@@ -619,6 +636,10 @@ export class ProviderResolver {
           return null;
         }
 
+        if (this.isVevoMetadata({ title: video.title, artist: video.channel?.name, url: playbackUrl })) {
+          return null;
+        }
+
         return {
           title: video.title ?? "Unknown title",
           artist: video.channel?.name,
@@ -666,6 +687,10 @@ export class ProviderResolver {
       .map((video) => {
         const playbackUrl = this.buildYouTubePlaybackUrl(video.url, "id" in video ? video.id : undefined);
         if (!playbackUrl) {
+          return null;
+        }
+
+        if (this.isVevoMetadata({ title: video.title, artist: video.channel?.name, url: playbackUrl })) {
           return null;
         }
 
@@ -1387,6 +1412,48 @@ export class ProviderResolver {
 
   private buildYouTubePlaybackUrl(url: string | undefined, id: string | undefined): string | undefined {
     return url ?? (id ? `https://www.youtube.com/watch?v=${id}` : undefined);
+  }
+
+  private rejectVevoLink(): never {
+    throw new Error(vevoRejectedMessage);
+  }
+
+  private isVevoMetadata({ title, artist, url }: { title?: string; artist?: string; url?: string }) {
+    return this.isVevoUrl(url) || this.isVevoChannelName(artist) || this.isVevoChannelName(title);
+  }
+
+  private isVevoChannelName(value: string | undefined) {
+    if (!value) {
+      return false;
+    }
+
+    const normalized = value.trim().toLowerCase().replace(/[\s._-]+/g, "");
+    return normalized === "vevo" || normalized.endsWith("vevo");
+  }
+
+  private isVevoUrl(url: string | undefined) {
+    if (!url) {
+      return false;
+    }
+
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+      if (hostname === "vevo.com" || hostname.endsWith(".vevo.com")) {
+        return true;
+      }
+
+      if (!/(^|\.)youtube\.com$/i.test(hostname) && hostname !== "youtu.be") {
+        return false;
+      }
+
+      return parsed.pathname
+        .split("/")
+        .filter(Boolean)
+        .some((segment) => this.isVevoChannelName(decodeURIComponent(segment).replace(/^@/, "")));
+    } catch {
+      return /\bvevo\.com\b/i.test(url);
+    }
   }
 
   private handleSoundCloudSearchError(context: string, error: unknown) {

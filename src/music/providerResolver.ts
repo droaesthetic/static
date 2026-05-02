@@ -8,6 +8,7 @@ interface ResolveOptions {
   query: string;
   requestedBy: string;
   requestedById: string;
+  preferAudioOnly?: boolean;
 }
 
 interface AutoplayResolveOptions {
@@ -44,6 +45,10 @@ interface PlaybackCandidate {
   playbackUrl: string;
 }
 
+interface PlaybackResolvePreferences {
+  avoidMusicVideos?: boolean;
+}
+
 interface SpotifyPlaylistResolveOptions {
   url: string;
   requestedBy: string;
@@ -57,6 +62,12 @@ interface SpotifyPlaylistResolveResult {
   tracks: ResolvedTrack[];
 }
 
+interface SpotifyPlaylistMetadataResult {
+  name: string;
+  totalTracks: number;
+  tracks: SpotifyPlaylistTrackMetadata[];
+}
+
 interface SpotifyPlaylistTrackMetadata {
   title: string;
   artists: string[];
@@ -66,29 +77,32 @@ interface SpotifyPlaylistTrackMetadata {
   url: string;
 }
 
+interface SpotifyApiTrack {
+  type?: string;
+  name?: string;
+  duration_ms?: number;
+  is_playable?: boolean;
+  external_urls?: { spotify?: string };
+  album?: {
+    name?: string;
+    images?: Array<{ url?: string; height?: number; width?: number }>;
+  };
+  artists?: Array<{ name?: string }>;
+}
+
 interface SpotifyPlaylistPage {
   total?: number;
   next?: string | null;
   items?: Array<{
-    track?: {
-      type?: string;
-      name?: string;
-      duration_ms?: number;
-      is_playable?: boolean;
-      external_urls?: { spotify?: string };
-      album?: {
-        name?: string;
-        images?: Array<{ url?: string; height?: number; width?: number }>;
-      };
-      artists?: Array<{ name?: string }>;
-    } | null;
+    item?: SpotifyApiTrack | null;
+    track?: SpotifyApiTrack | null;
   }>;
 }
 
 const providerMatchers: Array<{ provider: Provider; regex: RegExp }> = [
   { provider: "youtube", regex: /(?:youtube\.com|youtu\.be)/i },
   { provider: "soundcloud", regex: /soundcloud\.com/i },
-  { provider: "spotify", regex: /spotify\.com/i },
+  { provider: "spotify", regex: /(?:spotify\.com|spoti\.fi|spotify\.link)/i },
   { provider: "deezer", regex: /deezer\.com/i },
   { provider: "apple_music", regex: /music\.apple\.com/i },
   { provider: "suno", regex: /suno\.com/i },
@@ -115,7 +129,7 @@ export class ProviderResolver {
   private soundCloudSearchEnabled = true;
   private spotifyAccessToken?: { value: string; expiresAt: number };
 
-  async resolve({ query, requestedBy, requestedById }: ResolveOptions): Promise<ResolvedTrack> {
+  async resolve({ query, requestedBy, requestedById, preferAudioOnly = false }: ResolveOptions): Promise<ResolvedTrack> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       throw new Error("Provide a song URL, search query, or uploaded audio file.");
@@ -134,7 +148,7 @@ export class ProviderResolver {
     const provider = isUrl ? this.detectProvider(normalizedQuery) : "search";
 
     if (provider === "search") {
-      return this.resolveSearch(normalizedQuery, requestedBy, requestedById);
+      return this.resolveSearch(normalizedQuery, requestedBy, requestedById, preferAudioOnly);
     }
 
     if (provider === "youtube") {
@@ -153,7 +167,7 @@ export class ProviderResolver {
       artists: metadata.artists,
       album: metadata.album,
       durationInSeconds: metadata.durationInSeconds
-    });
+    }, { avoidMusicVideos: preferAudioOnly });
 
     return {
       title: metadata.title ?? playback.title ?? "Unknown title",
@@ -273,19 +287,34 @@ export class ProviderResolver {
     const token = await this.getSpotifyAccessToken();
     const playlistUrl = new URL(`https://api.spotify.com/v1/playlists/${playlistId}`);
     playlistUrl.searchParams.set("market", "US");
-    playlistUrl.searchParams.set(
-      "fields",
-      "name,tracks(total,next,items(track(type,name,duration_ms,external_urls,album(name,images),artists(name),is_playable)))"
-    );
+    let playlistName = "Spotify Playlist";
+    let totalTracks = 0;
+    let metadata: SpotifyPlaylistTrackMetadata[] = [];
 
-    const initial = await this.fetchSpotifyJson<{
-      name?: string;
-      tracks?: SpotifyPlaylistPage;
-    }>(playlistUrl.toString(), token);
+    try {
+      const initial = await this.fetchSpotifyJson<{
+        name?: string;
+        items?: SpotifyPlaylistPage;
+        tracks?: SpotifyPlaylistPage;
+      }>(playlistUrl.toString(), token);
 
-    const playlistName = initial.name || "Spotify Playlist";
-    const totalTracks = initial.tracks?.total ?? 0;
-    const metadata = await this.collectSpotifyPlaylistTracks(initial.tracks, token, maxTracks);
+      const firstPage = initial.items ?? initial.tracks;
+      playlistName = initial.name || playlistName;
+      totalTracks = firstPage?.total ?? totalTracks;
+      metadata = await this.collectSpotifyPlaylistTracks(firstPage, token, maxTracks);
+    } catch (error) {
+      console.warn(
+        "[spotify:playlist] Web API playlist contents unavailable; using public page fallback",
+        error instanceof Error ? error.message : error
+      );
+    }
+
+    if (!metadata.length) {
+      const fallback = await this.resolveSpotifyPlaylistFromPublicPage(url, token, maxTracks);
+      playlistName = fallback.name;
+      totalTracks = fallback.totalTracks;
+      metadata = fallback.tracks;
+    }
 
     const resolvedTracks: ResolvedTrack[] = [];
     for (let index = 0; index < metadata.length; index += 4) {
@@ -324,8 +353,13 @@ export class ProviderResolver {
     return "search";
   }
 
-  private async resolveSearch(query: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
-    const playback = await this.findPlayableAlternative(query);
+  private async resolveSearch(
+    query: string,
+    requestedBy: string,
+    requestedById: string,
+    preferAudioOnly: boolean
+  ): Promise<ResolvedTrack> {
+    const playback = await this.findPlayableAlternative(query, { avoidMusicVideos: preferAudioOnly });
     return {
       ...playback,
       url: playback.playbackUrl,
@@ -423,15 +457,15 @@ export class ProviderResolver {
     };
   }
 
-  private async findPlayableAlternative(target: string | PlaybackSearchTarget) {
+  private async findPlayableAlternative(target: string | PlaybackSearchTarget, preferences: PlaybackResolvePreferences = {}) {
     const normalizedTarget = typeof target === "string"
       ? { query: target }
       : target;
 
-    return this.findPlayableAlternativeFromQueries(normalizedTarget);
+    return this.findPlayableAlternativeFromQueries(normalizedTarget, preferences);
   }
 
-  private async findPlayableAlternativeFromQueries(target: PlaybackSearchTarget) {
+  private async findPlayableAlternativeFromQueries(target: PlaybackSearchTarget, preferences: PlaybackResolvePreferences = {}) {
     const searchQueries = this.buildPlaybackSearchQueries(target);
     const youtubeCandidates = new Map<string, PlaybackCandidate>();
 
@@ -456,10 +490,17 @@ export class ProviderResolver {
       }
     }
 
-    const rankedYouTubeResults = [...youtubeCandidates.values()]
+    const youtubePool = [...youtubeCandidates.values()];
+    const filteredYouTubePool = preferences.avoidMusicVideos
+      ? youtubePool.filter((candidate) => !this.isLikelyMusicVideoCandidate(candidate))
+      : youtubePool;
+    const audioPreferredPool = preferences.avoidMusicVideos
+      ? this.selectAudioPreferredCandidates(filteredYouTubePool)
+      : filteredYouTubePool;
+    const rankedYouTubeResults = audioPreferredPool
       .map((video) => ({
         ...video,
-        score: this.scoreCandidate(video, target)
+        score: this.scoreCandidate(video, target) + this.scoreAudioFirstPreference(video, preferences)
       }))
       .sort((left, right) => right.score - left.score);
 
@@ -474,6 +515,10 @@ export class ProviderResolver {
         playbackUrl: bestVideo.playbackUrl
       };
     }
+
+    const audioOnlyYouTubeExplanation = preferences.avoidMusicVideos && !audioPreferredPool.length
+      ? this.explainAudioOnlyYouTubeMiss(youtubePool, filteredYouTubePool, audioPreferredPool)
+      : undefined;
 
     let rankedSoundCloudResults: Array<PlaybackCandidate & { score: number }> = [];
     if (this.soundCloudSearchEnabled) {
@@ -510,7 +555,15 @@ export class ProviderResolver {
 
     const [first] = rankedSoundCloudResults;
     if (!first) {
-      throw new Error("No playable match found for that link.");
+      if (audioOnlyYouTubeExplanation) {
+        throw new Error(audioOnlyYouTubeExplanation);
+      }
+
+      throw new Error(
+        preferences.avoidMusicVideos
+          ? "Could not find a confident audio-only match. Try artist plus song title, paste an upload link (SoundCloud or a clearly labeled audio YouTube upload), or run `moderation preferaudioonly off` for broader YouTube matching."
+          : "No playable match found for that link."
+      );
     }
 
     return {
@@ -735,24 +788,12 @@ export class ProviderResolver {
 
     while (page && tracks.length < maxTracks) {
       for (const item of page.items ?? []) {
-        const track = item.track;
-        if (!track || track.type !== "track" || !track.name || track.is_playable === false) {
+        const metadata = this.spotifyTrackToMetadata(item.track ?? item.item);
+        if (!metadata) {
           continue;
         }
 
-        const artists = track.artists?.map((artist) => artist.name).filter((name): name is string => Boolean(name)) ?? [];
-        if (!artists.length) {
-          continue;
-        }
-
-        tracks.push({
-          title: track.name,
-          artists,
-          album: track.album?.name,
-          artwork: track.album?.images?.[0]?.url,
-          durationInSeconds: track.duration_ms ? Math.floor(track.duration_ms / 1000) : undefined,
-          url: track.external_urls?.spotify ?? ""
-        });
+        tracks.push(metadata);
 
         if (tracks.length >= maxTracks) {
           break;
@@ -770,33 +811,126 @@ export class ProviderResolver {
     return tracks;
   }
 
+  private async resolveSpotifyPlaylistFromPublicPage(
+    url: string,
+    token: string,
+    maxTracks: number
+  ): Promise<SpotifyPlaylistMetadataResult> {
+    const response = await fetch(url, {
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "user-agent": "Mozilla/5.0"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Spotify playlist page could not be loaded (${response.status}).`);
+    }
+
+    const html = await response.text();
+    const playlistName = this.cleanProviderDecorations(
+      this.readMeta(html, "og:title") ?? this.readMeta(html, "twitter:title") ?? this.readTitleTag(html),
+      "spotify"
+    ) ?? "Spotify Playlist";
+    const allTrackIds = this.readSpotifyTrackIdsFromHtml(html);
+    const trackIds = allTrackIds.slice(0, maxTracks);
+
+    if (!trackIds.length) {
+      throw new Error("I found that Spotify playlist, but Spotify did not expose any public tracks for the bot to queue.");
+    }
+
+    const tracks: SpotifyPlaylistTrackMetadata[] = [];
+    for (let index = 0; index < trackIds.length; index += 5) {
+      const chunk = trackIds.slice(index, index + 5);
+      const results = await Promise.allSettled(
+        chunk.map((trackId) => this.fetchSpotifyTrack(trackId, token))
+      );
+
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value) {
+          tracks.push(result.value);
+        } else if (result.status === "rejected") {
+          console.warn("[spotify:playlist] failed to load track metadata from public page fallback", result.reason);
+        }
+      }
+    }
+
+    if (!tracks.length) {
+      throw new Error("I found that Spotify playlist, but none of its public tracks could be loaded from Spotify.");
+    }
+
+    return {
+      name: playlistName,
+      totalTracks: allTrackIds.length,
+      tracks
+    };
+  }
+
+  private readSpotifyTrackIdsFromHtml(html: string) {
+    const ids = new Set<string>();
+    const patterns = [
+      /spotify:track:([A-Za-z0-9]{22})/g,
+      /spotify%3Atrack%3A([A-Za-z0-9]{22})/g
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of html.matchAll(pattern)) {
+        if (match[1]) {
+          ids.add(match[1]);
+        }
+      }
+    }
+
+    return [...ids];
+  }
+
+  private async fetchSpotifyTrack(trackId: string, token: string) {
+    const trackUrl = new URL(`https://api.spotify.com/v1/tracks/${trackId}`);
+    trackUrl.searchParams.set("market", "US");
+    const track = await this.fetchSpotifyJson<SpotifyApiTrack>(trackUrl.toString(), token);
+    return this.spotifyTrackToMetadata(track);
+  }
+
+  private spotifyTrackToMetadata(track: SpotifyApiTrack | null | undefined): SpotifyPlaylistTrackMetadata | undefined {
+    if (!track || track.type !== "track" || !track.name || track.is_playable === false) {
+      return undefined;
+    }
+
+    const artists = track.artists?.map((artist) => artist.name).filter((name): name is string => Boolean(name)) ?? [];
+    if (!artists.length) {
+      return undefined;
+    }
+
+    return {
+      title: track.name,
+      artists,
+      album: track.album?.name,
+      artwork: track.album?.images?.[0]?.url,
+      durationInSeconds: track.duration_ms ? Math.floor(track.duration_ms / 1000) : undefined,
+      url: track.external_urls?.spotify ?? ""
+    };
+  }
+
   private async resolveSpotifyPlaylistTrack(
     track: SpotifyPlaylistTrackMetadata,
     requestedBy: string,
     requestedById: string
   ): Promise<ResolvedTrack> {
     const [artist] = track.artists;
-    const playback = await this.findPlayableAlternative({
-      query: [artist, track.title].filter(Boolean).join(" - "),
-      title: track.title,
-      artist,
-      artists: track.artists,
-      album: track.album,
-      durationInSeconds: track.durationInSeconds
-    });
+    const playbackSearch = [artist, track.title].filter(Boolean).join(" - ") || track.title;
 
     return {
       id: randomUUID(),
       title: track.title,
       artist,
-      url: track.url || playback.playbackUrl,
-      artwork: track.artwork ?? playback.artwork,
-      durationInSeconds: track.durationInSeconds ?? playback.durationInSeconds,
+      url: track.url || `https://open.spotify.com/search/${encodeURIComponent(playbackSearch)}`,
+      artwork: track.artwork,
+      durationInSeconds: track.durationInSeconds,
       requestedBy,
       requestedById,
       sourceProvider: "spotify",
-      playbackProvider: playback.playbackProvider,
-      playbackUrl: playback.playbackUrl,
+      playbackProvider: "youtube",
+      playbackUrl: `ytsearch:${playbackSearch}`,
       addedAt: new Date().toISOString()
     };
   }
@@ -1352,6 +1486,80 @@ export class ProviderResolver {
       .replace(/\s*-\s*(?:official|audio|video|lyrics?|visualizer|sped up|slowed.*?|nightcore|8d|bass boosted|live|remix|cover).*$/gi, "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  private isLikelyMusicVideoCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">) {
+    const title = this.normalizeForMatch(candidate.title);
+    const artist = this.normalizeForMatch(candidate.artist);
+    const descriptor = `${title} ${artist}`;
+
+    return (
+      /\bofficial music video\b/.test(descriptor)
+      || /\bmusic video\b/.test(descriptor)
+      || /\bofficial video\b/.test(descriptor)
+      || /\bvideo oficial\b/.test(descriptor)
+      || /\bofficial mv\b/.test(descriptor)
+      || /\bmv\b/.test(descriptor)
+    );
+  }
+
+  private explainAudioOnlyYouTubeMiss(
+    youtubePool: PlaybackCandidate[],
+    filteredYouTubePool: PlaybackCandidate[],
+    audioPreferredPool: PlaybackCandidate[]
+  ) {
+    if (!youtubePool.length) {
+      return "No YouTube results showed up for that search. Try a clearer artist plus song title, or paste a direct link.";
+    }
+
+    if (!filteredYouTubePool.length) {
+      return "Every suggested YouTube result looked like a music video, so audio-only mode skipped them all. Try a different spelling, add the artist name, paste a Topic or official audio link, or turn off audio-only preference with `moderation preferaudioonly off`.";
+    }
+
+    if (!audioPreferredPool.length) {
+      return "YouTube turned up uploads, but none were clearly labeled as audio (official audio / Topic uploads). Paste a Topic or explicit audio upload link, try `artist title official audio`, or turn off audio-only preference with `moderation preferaudioonly off`.";
+    }
+
+    return "Could not pick a confident audio-only YouTube upload. Paste a clearer link or tune `moderation preferaudioonly off` if you want broader matching.";
+  }
+
+  private selectAudioPreferredCandidates(candidates: PlaybackCandidate[]) {
+    const preferred = candidates.filter((candidate) => this.isAudioPreferredCandidate(candidate));
+    return preferred;
+  }
+
+  private isAudioPreferredCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">) {
+    const title = this.normalizeForMatch(candidate.title);
+    const artist = this.normalizeForMatch(candidate.artist);
+
+    return (
+      title.includes("official audio")
+      || (title.includes("audio") && !title.includes("video"))
+      || artist.includes(" topic")
+      || artist.endsWith(" topic")
+    );
+  }
+
+  private scoreAudioFirstPreference(candidate: Pick<PlaybackCandidate, "title" | "artist">, preferences: PlaybackResolvePreferences) {
+    if (!preferences.avoidMusicVideos) {
+      return 0;
+    }
+
+    const title = this.normalizeForMatch(candidate.title);
+    const artist = this.normalizeForMatch(candidate.artist);
+    let bonus = 0;
+
+    if (title.includes("official audio")) {
+      bonus += 120;
+    } else if (title.includes("audio") && !title.includes("video")) {
+      bonus += 40;
+    }
+
+    if (artist.includes(" topic") || artist.endsWith(" topic")) {
+      bonus += 70;
+    }
+
+    return bonus;
   }
 
   private isSameTrack(

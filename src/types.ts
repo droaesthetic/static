@@ -39,6 +39,7 @@ export interface GuildSettings {
   prefix: string;
   autoplay: boolean;
   voteSkipEnabled: boolean;
+  preferAudioOnly: boolean;
   permissionMode: PermissionMode;
   djRoleId?: string;
   disabledCommands: string[];

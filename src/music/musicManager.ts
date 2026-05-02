@@ -38,6 +38,7 @@ function createDefaultGuildSettings(guildId: string): GuildSettings {
     prefix: defaultPrefix,
     autoplay: false,
     voteSkipEnabled: false,
+    preferAudioOnly: true,
     permissionMode: "everyone",
     disabledCommands: [],
     channelSettings: {},
@@ -172,6 +173,7 @@ export class MusicManager {
   }
 
   async play(interaction: ChatInputCommandInteraction, query: string) {
+    const normalizedQuery = this.normalizePlayableInput(query);
     const guild = interaction.guild;
     if (!guild) {
       throw new Error("This command can only be used in a server.");
@@ -188,7 +190,7 @@ export class MusicManager {
 
     const player = await this.ensurePlayer(guild, voiceChannel, interaction.channelId);
     const playlistResult = await this.resolvePlaylistLink(
-      query,
+      normalizedQuery,
       guild.id,
       interaction.user.username,
       interaction.user.id,
@@ -200,9 +202,10 @@ export class MusicManager {
     }
 
     const track = await this.resolver.resolve({
-      query,
+      query: normalizedQuery,
       requestedBy: interaction.user.username,
-      requestedById: interaction.user.id
+      requestedById: interaction.user.id,
+      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -211,6 +214,7 @@ export class MusicManager {
   }
 
   async insert(interaction: ChatInputCommandInteraction, query: string) {
+    const normalizedQuery = this.normalizePlayableInput(query);
     const guild = interaction.guild;
     if (!guild) {
       throw new Error("This command can only be used in a server.");
@@ -226,10 +230,15 @@ export class MusicManager {
     await this.assertCanControl(member, guild.id);
 
     const player = await this.ensurePlayer(guild, voiceChannel, interaction.channelId);
+    if (this.isPlaylistUrl(normalizedQuery)) {
+      throw new Error("Use `play` for playlists. `insert` only supports one track at a time.");
+    }
+
     const track = await this.resolver.resolve({
-      query,
+      query: normalizedQuery,
       requestedBy: interaction.user.username,
-      requestedById: interaction.user.id
+      requestedById: interaction.user.id,
+      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -281,7 +290,8 @@ export class MusicManager {
     return tracks;
   }
 
-  async playFromMessage(message: Message, query: string) {
+  async playFromMessage(message: Message, query: string): Promise<PlayResult> {
+    const normalizedQuery = this.normalizePlayableInput(query);
     const guild = message.guild;
     if (!guild) {
       throw new Error("This command can only be used in a server.");
@@ -297,18 +307,32 @@ export class MusicManager {
     await this.assertCanControl(member, guild.id);
 
     const player = await this.ensurePlayer(guild, voiceChannel, message.channelId);
+    const playlistResult = await this.resolvePlaylistLink(
+      normalizedQuery,
+      guild.id,
+      message.author.username,
+      message.author.id,
+      player.snapshot().upcoming.length
+    );
+    if (playlistResult) {
+      await player.enqueueMany(playlistResult.tracks);
+      return playlistResult;
+    }
+
     const track = await this.resolver.resolve({
-      query,
+      query: normalizedQuery,
       requestedBy: message.author.username,
-      requestedById: message.author.id
+      requestedById: message.author.id,
+      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
     });
     this.assertTrackWithinLimit(guild.id, track);
 
     await player.enqueue(track);
-    return track;
+    return { tracks: [track] };
   }
 
   async insertFromMessage(message: Message, query: string) {
+    const normalizedQuery = this.normalizePlayableInput(query);
     const guild = message.guild;
     if (!guild) {
       throw new Error("This command can only be used in a server.");
@@ -324,10 +348,15 @@ export class MusicManager {
     await this.assertCanControl(member, guild.id);
 
     const player = await this.ensurePlayer(guild, voiceChannel, message.channelId);
+    if (this.isPlaylistUrl(normalizedQuery)) {
+      throw new Error("Use `play` for playlists. `insert` only supports one track at a time.");
+    }
+
     const track = await this.resolver.resolve({
-      query,
+      query: normalizedQuery,
       requestedBy: message.author.username,
-      requestedById: message.author.id
+      requestedById: message.author.id,
+      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -346,7 +375,8 @@ export class MusicManager {
     requestedById: string,
     currentQueueLength: number
   ): Promise<PlayResult | null> {
-    if (!this.isPlaylistUrl(query)) {
+    const normalizedQuery = await this.normalizePlayableUrlForResolution(query);
+    if (!this.isPlaylistUrl(normalizedQuery)) {
       return null;
     }
 
@@ -355,9 +385,9 @@ export class MusicManager {
       throw new Error(`Queue limit reached (${appConfig.maxQueueSize} tracks).`);
     }
 
-    if (this.isSpotifyPlaylistUrl(query)) {
+    if (this.isSpotifyPlaylistUrl(normalizedQuery)) {
       const playlist = await this.resolver.resolveSpotifyPlaylist({
-        url: query,
+        url: normalizedQuery,
         requestedBy,
         requestedById,
         maxTracks: loadLimit
@@ -369,19 +399,19 @@ export class MusicManager {
       };
     }
 
-    if (!this.isLavalinkSupportedPlaylistUrl(query)) {
+    if (!this.isLavalinkSupportedPlaylistUrl(normalizedQuery)) {
       throw new Error(
         "That playlist provider is not configured for playlist expansion yet. Spotify, YouTube playlists, and SoundCloud sets can be queued with `/play query` right now."
       );
     }
 
-    const playlist = await this.lavalink.resolvePlaylist(query);
+    const playlist = await this.lavalink.resolvePlaylist(normalizedQuery);
     const playlistTracks = playlist.tracks.slice(0, loadLimit);
     this.assertPlaylistWithinLimit(guildId, playlistTracks.length);
 
     const tracks = playlistTracks.map((track) => {
       const durationInSeconds = Math.floor(track.info.length / 1000) || undefined;
-      const sourceUrl = track.info.uri ?? query;
+      const sourceUrl = track.info.uri ?? normalizedQuery;
       const sourceProvider = this.resolver.detectProvider(sourceUrl);
       const resolved: ResolvedTrack = {
         id: randomUUID(),
@@ -447,15 +477,58 @@ export class MusicManager {
   }
 
   private parseHttpUrl(query: string) {
-    if (!/^https?:\/\//i.test(query)) {
+    const normalizedQuery = this.normalizePlayableInput(query);
+    if (!/^https?:\/\//i.test(normalizedQuery)) {
       return undefined;
     }
 
     try {
-      return new URL(query);
+      return new URL(normalizedQuery);
     } catch {
       return undefined;
     }
+  }
+
+  private normalizePlayableInput(query: string) {
+    const trimmed = query.trim();
+    const bracketedUrl = trimmed.match(/^<\s*(https?:\/\/[^>]+)\s*>$/i)?.[1];
+    return bracketedUrl ?? trimmed;
+  }
+
+  private shouldPreferAudioOnly(guildId: string, query: string) {
+    const settings = this.getGuildSettings(guildId);
+    if (!settings.preferAudioOnly) {
+      return false;
+    }
+
+    const parsed = this.parseHttpUrl(query);
+    return !parsed;
+  }
+
+  private async normalizePlayableUrlForResolution(query: string) {
+    const normalized = this.normalizePlayableInput(query);
+    const parsed = this.parseHttpUrl(normalized);
+    if (!parsed || !this.isSpotifyShortHost(parsed.hostname)) {
+      return normalized;
+    }
+
+    try {
+      const response = await fetch(parsed.toString(), {
+        redirect: "follow",
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "user-agent": "DroTunesBot/0.1 (+playlist resolver)"
+        }
+      });
+      return response.url || normalized;
+    } catch {
+      return normalized;
+    }
+  }
+
+  private isSpotifyShortHost(hostname: string) {
+    const host = hostname.toLowerCase();
+    return host === "spoti.fi" || host === "spotify.link" || host.endsWith(".spotify.link");
   }
 
   private getExternalPlaylistLoadLimit(guildId: string, currentQueueLength: number) {

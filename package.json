@@ -1,7 +1,7 @@
 {
   "name": "dro-tunes",
   "version": "0.1.0",
-  "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Discord music bot with slash commands, multi-provider link resolution, and a web dashboard.",
   "scripts": {

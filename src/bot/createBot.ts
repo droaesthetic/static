@@ -183,6 +183,7 @@ function formatModerationSummary(music: MusicManager, guildId: string) {
     `Disabled commands: ${disabledCommands}`,
     `Max song length: ${settings.maxSongLengthSeconds ? `${settings.maxSongLengthSeconds}s` : "off"}`,
     `Max playlist length: ${settings.maxPlaylistLength ? `${settings.maxPlaylistLength} tracks` : "off"}`,
+    `Prefer audio-only queries: ${settings.preferAudioOnly ? "on" : "off"}`,
     `Channel overrides:\n${channelLines}`,
     `Member overrides:\n${memberLines}`
   ].join("\n");
@@ -446,6 +447,65 @@ async function sendLyricsToMessage(message: Message, result: LyricsResult) {
   }
 }
 
+async function maybeSendKaraokeLyricsToMessage(
+  message: Message,
+  music: MusicManager,
+  lyrics: LyricsService
+) {
+  const guildId = message.guild?.id;
+  if (!guildId) {
+    return;
+  }
+
+  const currentTrack = music.getCurrentTrack(guildId);
+  if (!currentTrack) {
+    return;
+  }
+
+  try {
+    const target = lyrics.buildTarget({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      durationInSeconds: currentTrack.durationInSeconds
+    });
+    const lyricResult = await lyrics.lookup(target);
+    await sendLyricsToMessage(message, lyricResult);
+  } catch (error) {
+    console.warn("[karaoke] failed to fetch lyrics for prefix command", error);
+  }
+}
+
+async function maybeSendKaraokeLyricsToInteraction(
+  interaction: ChatInputCommandInteraction,
+  music: MusicManager,
+  lyrics: LyricsService
+) {
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    return;
+  }
+
+  const currentTrack = music.getCurrentTrack(guildId);
+  if (!currentTrack) {
+    return;
+  }
+
+  try {
+    const target = lyrics.buildTarget({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      durationInSeconds: currentTrack.durationInSeconds
+    });
+    const lyricResult = await lyrics.lookup(target);
+    const chunks = formatLyricsChunks(lyricResult);
+    for (const chunk of chunks) {
+      await followUpInteraction(interaction, chunk, "Lyrics");
+    }
+  } catch (error) {
+    console.warn("[karaoke] failed to fetch lyrics for slash command", error);
+  }
+}
+
 function resolveModerationChannelId(interaction: ChatInputCommandInteraction) {
   const explicitChannel = interaction.options.getChannel("channel", false);
   if (explicitChannel) {
@@ -596,8 +656,18 @@ export async function createBot() {
 
           const input = query || attachment?.url;
           if (!input) throw new Error("Provide a song URL, search query, or attach a playable audio file.");
-          const track = await music.playFromMessage(message, input);
-          await replyAndAutoDelete(message, `Queued: **${track.title}**`);
+          const result = await music.playFromMessage(message, input);
+          const [track] = result.tracks;
+          if (!track) {
+            throw new Error("No tracks were queued.");
+          }
+
+          await replyAndAutoDelete(
+            message,
+            result.tracks.length > 1
+              ? `Queued **${result.tracks.length}**${result.playlistTotalTracks && result.playlistTotalTracks > result.tracks.length ? ` of **${result.playlistTotalTracks}**` : ""} tracks${result.playlistName ? ` from **${result.playlistName}**` : ""}.`
+              : `Queued: **${track.title}**${track.artist ? ` by ${track.artist}` : ""}`
+          );
           return;
         }
         case "insert": {
@@ -682,6 +752,9 @@ export async function createBot() {
 
           await music.setFilterPreset(message.guild.id, preset);
           await replyAndAutoDelete(message, `Filter set to **${preset}**.`);
+          if (preset === "karaoke") {
+            await maybeSendKaraokeLyricsToMessage(message, music, lyrics);
+          }
           return;
         }
         case "queue":
@@ -1049,6 +1122,9 @@ async function handleSlashCommand(
       const preset = interaction.options.getString("preset", true) as FilterPreset;
       await music.setFilterPreset(guildId, preset);
       await replyToInteraction(interaction, `Filter set to **${preset}**.`, "Playback Updated");
+      if (preset === "karaoke") {
+        await maybeSendKaraokeLyricsToInteraction(interaction, music, lyrics);
+      }
       return;
 
     case "skip":
@@ -1404,6 +1480,17 @@ async function handlePrefixModerationCommand(message: Message, music: MusicManag
       );
       return;
     }
+
+    case "preferaudioonly": {
+      const enabled = parseToggleValue(args[1]);
+      if (enabled === undefined) {
+        throw new Error("Use `moderation preferaudioonly <on|off>`.");
+      }
+
+      await music.updateGuildSettings(guildId, { preferAudioOnly: enabled });
+      await replyAndAutoDelete(message, `Audio-only query preference is now ${enabled ? "on" : "off"}.`);
+      return;
+    }
   }
 
   throw new Error("Unknown moderation subcommand.");
@@ -1484,6 +1571,17 @@ async function handleModerationCommand(interaction: ChatInputCommandInteraction,
     case "show":
       await replyToInteraction(interaction, { ...embedTextPayload(formatModerationSummary(music, guildId), { title: "Moderation Settings" }), ephemeral: true });
       return;
+
+    case "preferaudioonly": {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      await music.updateGuildSettings(guildId, { preferAudioOnly: enabled });
+      await replyToInteraction(
+        interaction,
+        `Audio-only query preference is now ${enabled ? "on" : "off"}.`,
+        "Moderation Updated"
+      );
+      return;
+    }
 
     case "channelmessages": {
       const enabled = interaction.options.getBoolean("enabled", true);

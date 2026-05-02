@@ -354,6 +354,14 @@ const commands = [
         .addIntegerOption((option) =>
           option.setName("tracks").setDescription("Maximum tracks per playlist").setRequired(true).setMinValue(0).setMaxValue(500)
         )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("preferaudioonly")
+        .setDescription("Prefer audio-only results for text search queries.")
+        .addBooleanOption((option) =>
+          option.setName("enabled").setDescription("Whether audio-only query preference is enabled").setRequired(true)
+        )
     ),
   new SlashCommandBuilder()
     .setName("owner")

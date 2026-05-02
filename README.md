@@ -46,8 +46,8 @@ npm run dev
 
 This project is now set up to run well as a local Windows bot.
 
-1. Fill in [`.env`](C:\Users\aleks\Desktop\dro-tunes\.env)
-2. Double-click [`start-local.bat`](C:\Users\aleks\Desktop\dro-tunes\start-local.bat)
+1. Copy [`.env.example`](./.env.example) to `.env` at the repo root and fill it in (`.env` is gitignored).
+2. Double-click [`start-local.bat`](./start-local.bat)
 
 Or run:
 
@@ -178,3 +178,7 @@ Render will provision TLS automatically after DNS is correct.
 ## Notes on audio quality
 
 Playback uses Discord voice at 48 kHz with Opus output from `play-dl` and `@discordjs/voice`. Final quality still depends on the source platform and Discord's own voice transport.
+
+## License
+
+This project is released under the [MIT License](LICENSE).

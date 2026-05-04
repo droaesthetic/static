@@ -8,7 +8,6 @@ interface ResolveOptions {
   query: string;
   requestedBy: string;
   requestedById: string;
-  preferAudioOnly?: boolean;
 }
 
 interface AutoplayResolveOptions {
@@ -43,10 +42,6 @@ interface PlaybackCandidate {
   durationInSeconds?: number;
   playbackProvider: "youtube" | "soundcloud";
   playbackUrl: string;
-}
-
-interface PlaybackResolvePreferences {
-  avoidMusicVideos?: boolean;
 }
 
 interface SpotifyPlaylistResolveOptions {
@@ -129,7 +124,7 @@ export class ProviderResolver {
   private soundCloudSearchEnabled = true;
   private spotifyAccessToken?: { value: string; expiresAt: number };
 
-  async resolve({ query, requestedBy, requestedById, preferAudioOnly = false }: ResolveOptions): Promise<ResolvedTrack> {
+  async resolve({ query, requestedBy, requestedById }: ResolveOptions): Promise<ResolvedTrack> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       throw new Error("Provide a song URL, search query, or uploaded audio file.");
@@ -148,7 +143,7 @@ export class ProviderResolver {
     const provider = isUrl ? this.detectProvider(normalizedQuery) : "search";
 
     if (provider === "search") {
-      return this.resolveSearch(normalizedQuery, requestedBy, requestedById, preferAudioOnly);
+      return this.resolveSearch(normalizedQuery, requestedBy, requestedById);
     }
 
     if (provider === "youtube") {
@@ -167,7 +162,7 @@ export class ProviderResolver {
       artists: metadata.artists,
       album: metadata.album,
       durationInSeconds: metadata.durationInSeconds
-    }, { avoidMusicVideos: preferAudioOnly });
+    });
 
     return {
       title: metadata.title ?? playback.title ?? "Unknown title",
@@ -353,13 +348,8 @@ export class ProviderResolver {
     return "search";
   }
 
-  private async resolveSearch(
-    query: string,
-    requestedBy: string,
-    requestedById: string,
-    preferAudioOnly: boolean
-  ): Promise<ResolvedTrack> {
-    const playback = await this.findPlayableAlternative(query, { avoidMusicVideos: preferAudioOnly });
+  private async resolveSearch(query: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
+    const playback = await this.findPlayableAlternative(query);
     return {
       ...playback,
       url: playback.playbackUrl,
@@ -457,15 +447,15 @@ export class ProviderResolver {
     };
   }
 
-  private async findPlayableAlternative(target: string | PlaybackSearchTarget, preferences: PlaybackResolvePreferences = {}) {
+  private async findPlayableAlternative(target: string | PlaybackSearchTarget) {
     const normalizedTarget = typeof target === "string"
       ? { query: target }
       : target;
 
-    return this.findPlayableAlternativeFromQueries(normalizedTarget, preferences);
+    return this.findPlayableAlternativeFromQueries(normalizedTarget);
   }
 
-  private async findPlayableAlternativeFromQueries(target: PlaybackSearchTarget, preferences: PlaybackResolvePreferences = {}) {
+  private async findPlayableAlternativeFromQueries(target: PlaybackSearchTarget) {
     const searchQueries = this.buildPlaybackSearchQueries(target);
     const youtubeCandidates = new Map<string, PlaybackCandidate>();
 
@@ -491,16 +481,10 @@ export class ProviderResolver {
     }
 
     const youtubePool = [...youtubeCandidates.values()];
-    const filteredYouTubePool = preferences.avoidMusicVideos
-      ? youtubePool.filter((candidate) => !this.isLikelyMusicVideoCandidate(candidate))
-      : youtubePool;
-    const audioPreferredPool = preferences.avoidMusicVideos
-      ? this.selectAudioPreferredCandidates(filteredYouTubePool)
-      : filteredYouTubePool;
-    const rankedYouTubeResults = audioPreferredPool
+    const rankedYouTubeResults = youtubePool
       .map((video) => ({
         ...video,
-        score: this.scoreCandidate(video, target) + this.scoreAudioFirstPreference(video, preferences)
+        score: this.scoreCandidate(video, target)
       }))
       .sort((left, right) => right.score - left.score);
 
@@ -515,10 +499,6 @@ export class ProviderResolver {
         playbackUrl: bestVideo.playbackUrl
       };
     }
-
-    const audioOnlyYouTubeExplanation = preferences.avoidMusicVideos && !audioPreferredPool.length
-      ? this.explainAudioOnlyYouTubeMiss(youtubePool, filteredYouTubePool, audioPreferredPool)
-      : undefined;
 
     let rankedSoundCloudResults: Array<PlaybackCandidate & { score: number }> = [];
     if (this.soundCloudSearchEnabled) {
@@ -555,15 +535,7 @@ export class ProviderResolver {
 
     const [first] = rankedSoundCloudResults;
     if (!first) {
-      if (audioOnlyYouTubeExplanation) {
-        throw new Error(audioOnlyYouTubeExplanation);
-      }
-
-      throw new Error(
-        preferences.avoidMusicVideos
-          ? "Could not find a confident audio-only match. Try artist plus song title, paste an upload link (SoundCloud or a clearly labeled audio YouTube upload), or run `moderation preferaudioonly off` for broader YouTube matching."
-          : "No playable match found for that link."
-      );
+      throw new Error("No playable match found for that link.");
     }
 
     return {
@@ -1207,6 +1179,10 @@ export class ProviderResolver {
       score += 4;
     }
 
+    const lyricPref = this.lyricVideoPreferenceBonus(lowerCandidateTitle, lowerCandidateArtist);
+    score += lyricPref;
+    score -= this.musicVideoPreferencePenalty(lowerCandidateTitle, lowerCandidateArtist, lyricPref > 0);
+
     if (target.durationInSeconds && candidate.durationInSeconds) {
       const delta = Math.abs(target.durationInSeconds - candidate.durationInSeconds);
       if (delta <= 2) {
@@ -1223,8 +1199,6 @@ export class ProviderResolver {
     }
 
     const strongerUnwantedTerms = [
-      "lyrics",
-      "lyric video",
       "visualizer",
       "fan made",
       "fanmade",
@@ -1250,6 +1224,50 @@ export class ProviderResolver {
     }
 
     return score;
+  }
+
+  /** Prefer uploads labeled as lyric / lyrics over plain music videos when search-matching. */
+  private lyricVideoPreferenceBonus(lowerTitle: string, lowerArtist: string): number {
+    const descriptor = `${lowerTitle} ${lowerArtist}`;
+    if (/\blyric(?:al)?(?:\s+video)?\b/i.test(descriptor) || /\blyrics?\s+video\b/i.test(descriptor)) {
+      return 48;
+    }
+
+    if (/\([^)]*\blyrics?\b[^)]*\)|\[[^\]]*\blyrics?\b[^\]]*\]/i.test(lowerTitle)) {
+      return 40;
+    }
+
+    if (/\bwith\s+lyrics\b|\bsing[\s-]?along\b/i.test(descriptor)) {
+      return 32;
+    }
+
+    if (/\blyrics\b/i.test(lowerTitle)) {
+      return 22;
+    }
+
+    return 0;
+  }
+
+  /** Down-rank obvious music-video titles when a lyric-style upload was not detected. */
+  private musicVideoPreferencePenalty(lowerTitle: string, lowerArtist: string, looksLikeLyricUpload: boolean): number {
+    if (looksLikeLyricUpload || /\blyric/i.test(`${lowerTitle} ${lowerArtist}`)) {
+      return 0;
+    }
+
+    const descriptor = `${lowerTitle} ${lowerArtist}`;
+    if (/\bofficial\s+music\s+video\b|\bmusic\s+video\b/i.test(descriptor)) {
+      return 38;
+    }
+
+    if (/\bofficial\s+video\b/i.test(lowerTitle) && !/\blyric/i.test(descriptor)) {
+      return 18;
+    }
+
+    if (/\bmv\b/i.test(lowerTitle)) {
+      return 12;
+    }
+
+    return 0;
   }
 
   private scoreAutoplayCandidate(
@@ -1300,7 +1318,13 @@ export class ProviderResolver {
       score += 8;
     }
 
-    for (const unwantedTerm of ["live", "remix", "cover", "karaoke", "instrumental", "sped up", "slowed", "nightcore", "reverb", "lyrics", "lyric", "visualizer", "fanmade", "fan made", "8d"]) {
+    const lt = candidate.title?.toLowerCase() ?? "";
+    const la = candidate.artist?.toLowerCase() ?? "";
+    const lyricPref = this.lyricVideoPreferenceBonus(lt, la);
+    score += lyricPref;
+    score -= this.musicVideoPreferencePenalty(lt, la, lyricPref > 0);
+
+    for (const unwantedTerm of ["live", "remix", "cover", "karaoke", "instrumental", "sped up", "slowed", "nightcore", "reverb", "visualizer", "fanmade", "fan made", "8d"]) {
       if (candidateDescriptorSource.includes(unwantedTerm)) {
         score -= 22;
       }
@@ -1486,80 +1510,6 @@ export class ProviderResolver {
       .replace(/\s*-\s*(?:official|audio|video|lyrics?|visualizer|sped up|slowed.*?|nightcore|8d|bass boosted|live|remix|cover).*$/gi, "")
       .replace(/\s+/g, " ")
       .trim();
-  }
-
-  private isLikelyMusicVideoCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">) {
-    const title = this.normalizeForMatch(candidate.title);
-    const artist = this.normalizeForMatch(candidate.artist);
-    const descriptor = `${title} ${artist}`;
-
-    return (
-      /\bofficial music video\b/.test(descriptor)
-      || /\bmusic video\b/.test(descriptor)
-      || /\bofficial video\b/.test(descriptor)
-      || /\bvideo oficial\b/.test(descriptor)
-      || /\bofficial mv\b/.test(descriptor)
-      || /\bmv\b/.test(descriptor)
-    );
-  }
-
-  private explainAudioOnlyYouTubeMiss(
-    youtubePool: PlaybackCandidate[],
-    filteredYouTubePool: PlaybackCandidate[],
-    audioPreferredPool: PlaybackCandidate[]
-  ) {
-    if (!youtubePool.length) {
-      return "No YouTube results showed up for that search. Try a clearer artist plus song title, or paste a direct link.";
-    }
-
-    if (!filteredYouTubePool.length) {
-      return "Every suggested YouTube result looked like a music video, so audio-only mode skipped them all. Try a different spelling, add the artist name, paste a Topic or official audio link, or turn off audio-only preference with `moderation preferaudioonly off`.";
-    }
-
-    if (!audioPreferredPool.length) {
-      return "YouTube turned up uploads, but none were clearly labeled as audio (official audio / Topic uploads). Paste a Topic or explicit audio upload link, try `artist title official audio`, or turn off audio-only preference with `moderation preferaudioonly off`.";
-    }
-
-    return "Could not pick a confident audio-only YouTube upload. Paste a clearer link or tune `moderation preferaudioonly off` if you want broader matching.";
-  }
-
-  private selectAudioPreferredCandidates(candidates: PlaybackCandidate[]) {
-    const preferred = candidates.filter((candidate) => this.isAudioPreferredCandidate(candidate));
-    return preferred;
-  }
-
-  private isAudioPreferredCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">) {
-    const title = this.normalizeForMatch(candidate.title);
-    const artist = this.normalizeForMatch(candidate.artist);
-
-    return (
-      title.includes("official audio")
-      || (title.includes("audio") && !title.includes("video"))
-      || artist.includes(" topic")
-      || artist.endsWith(" topic")
-    );
-  }
-
-  private scoreAudioFirstPreference(candidate: Pick<PlaybackCandidate, "title" | "artist">, preferences: PlaybackResolvePreferences) {
-    if (!preferences.avoidMusicVideos) {
-      return 0;
-    }
-
-    const title = this.normalizeForMatch(candidate.title);
-    const artist = this.normalizeForMatch(candidate.artist);
-    let bonus = 0;
-
-    if (title.includes("official audio")) {
-      bonus += 120;
-    } else if (title.includes("audio") && !title.includes("video")) {
-      bonus += 40;
-    }
-
-    if (artist.includes(" topic") || artist.endsWith(" topic")) {
-      bonus += 70;
-    }
-
-    return bonus;
   }
 
   private isSameTrack(

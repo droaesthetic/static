@@ -5,7 +5,6 @@ import {
   Events,
   GatewayIntentBits,
   Partials,
-  PermissionFlagsBits,
   type ChatInputCommandInteraction,
   type GuildMember,
   type InteractionEditReplyOptions,
@@ -162,6 +161,10 @@ function normalizeCommandName(value: string) {
     return "nowplaying";
   }
 
+  if (normalized === "playlist") {
+    return "shock-list";
+  }
+
   return normalized;
 }
 
@@ -182,8 +185,7 @@ function formatModerationSummary(music: MusicManager, guildId: string) {
   return [
     `Disabled commands: ${disabledCommands}`,
     `Max song length: ${settings.maxSongLengthSeconds ? `${settings.maxSongLengthSeconds}s` : "off"}`,
-    `Max playlist length: ${settings.maxPlaylistLength ? `${settings.maxPlaylistLength} tracks` : "off"}`,
-    `Prefer audio-only queries: ${settings.preferAudioOnly ? "on" : "off"}`,
+    `Max shock-list length: ${settings.maxPlaylistLength ? `${settings.maxPlaylistLength} tracks` : "off"}`,
     `Channel overrides:\n${channelLines}`,
     `Member overrides:\n${memberLines}`
   ].join("\n");
@@ -308,10 +310,13 @@ async function editInteractionReply(
 async function followUpInteraction(
   interaction: ChatInputCommandInteraction,
   payload: string | InteractionReplyOptions,
-  title = BOT_BRAND_NAME
+  title = BOT_BRAND_NAME,
+  autoDelete = true
 ) {
   const followUp = await interaction.followUp(withInteractionReplyEmbedPayload(payload, title));
-  scheduleMessageDeletion("delete" in followUp ? followUp : undefined);
+  if (autoDelete) {
+    scheduleMessageDeletion("delete" in followUp ? followUp : undefined);
+  }
   return followUp;
 }
 
@@ -350,10 +355,14 @@ async function ensureControlAccess(interaction: ChatInputCommandInteraction, mus
   return member;
 }
 
-async function ensureModeratorAccess(interaction: ChatInputCommandInteraction, music: MusicManager) {
-  const member = await requireGuildMember(interaction);
+/** Same moderator gate for slash and prefix — keeps `voteskip`, `prefix set`, `clean`, etc. aligned. */
+async function ensureModeratorGuildMember(member: GuildMember, music: MusicManager) {
   await music.assertCanModerate(member);
   return member;
+}
+
+async function ensureModeratorAccess(interaction: ChatInputCommandInteraction, music: MusicManager) {
+  return ensureModeratorGuildMember(await requireGuildMember(interaction), music);
 }
 
 async function ensureBotOwnerAccess(interaction: ChatInputCommandInteraction, music: MusicManager) {
@@ -425,7 +434,7 @@ async function sendLyricsToInteraction(interaction: ChatInputCommandInteraction,
   }
 
   for (const chunk of restChunks) {
-    await followUpInteraction(interaction, chunk, "Lyrics");
+    await followUpInteraction(interaction, chunk, "Lyrics", false);
   }
 }
 
@@ -440,10 +449,9 @@ async function sendLyricsToMessage(message: Message, result: LyricsResult) {
     throw new Error("I couldn't post lyrics in this channel.");
   }
 
-  await replyAndAutoDelete(message, firstChunk);
+  await message.reply(withMessageEmbedPayload(firstChunk, "Lyrics"));
   for (const chunk of restChunks) {
-    const followUp = await message.channel.send(withMessageEmbedPayload(chunk, "Lyrics"));
-    scheduleMessageDeletion(followUp);
+    await message.channel.send(withMessageEmbedPayload(chunk, "Lyrics"));
   }
 }
 
@@ -499,7 +507,7 @@ async function maybeSendKaraokeLyricsToInteraction(
     const lyricResult = await lyrics.lookup(target);
     const chunks = formatLyricsChunks(lyricResult);
     for (const chunk of chunks) {
-      await followUpInteraction(interaction, chunk, "Lyrics");
+      await followUpInteraction(interaction, chunk, "Lyrics", false);
     }
   } catch (error) {
     console.warn("[karaoke] failed to fetch lyrics for slash command", error);
@@ -617,7 +625,9 @@ export async function createBot() {
 
     try {
       await handleSlashCommand(interaction, music, lyrics);
-      scheduleInteractionReplyDeletion(interaction);
+      if (interaction.commandName !== "lyrics") {
+        scheduleInteractionReplyDeletion(interaction);
+      }
     } catch (error) {
       console.error(`[slash:${interaction.commandName}]`, error);
       const message = error instanceof Error ? error.message : "Something went wrong.";
@@ -636,7 +646,8 @@ export async function createBot() {
     }
 
     const [rawCommand, ...rest] = message.content.slice(prefix.length).trim().split(/\s+/);
-    const command = rawCommand?.toLowerCase();
+    const rawLower = rawCommand?.toLowerCase();
+    const command = rawLower === "playlist" ? "shock-list" : rawLower;
     const query = rest.join(" ").trim();
 
     try {
@@ -879,7 +890,7 @@ export async function createBot() {
           return;
         }
         case "voteskip": {
-          await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id);
+          await ensureModeratorGuildMember(await message.guild.members.fetch(message.author.id), music);
           const enabled = parseToggleValue(rest[0]);
           const voteSkipEnabled = await music.toggleVoteSkip(message.guild.id, enabled);
           await replyAndAutoDelete(message, `Vote skip is now ${voteSkipEnabled ? "on" : "off"}.`);
@@ -892,7 +903,7 @@ export async function createBot() {
             return;
           }
 
-          await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id);
+          await ensureModeratorGuildMember(await message.guild.members.fetch(message.author.id), music);
           const newPrefix = rest.slice(1).join(" ").trim();
           if (!newPrefix) {
             throw new Error("Use `prefix set <value>`.");
@@ -904,7 +915,7 @@ export async function createBot() {
         case "permissions":
           await handlePrefixPermissionsCommand(message, music, rest);
           return;
-        case "playlist":
+        case "shock-list":
           await handlePrefixPlaylistCommand(message, music, rest);
           return;
         case "moderation":
@@ -933,10 +944,7 @@ export async function createBot() {
           throw new Error("Use `owner status` or `owner synccommands`.");
         }
         case "clean": {
-          const member = await message.guild.members.fetch(message.author.id);
-          if (!music.isBotOwnerId(member.id) && !member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-            throw new Error("You need Manage Messages or bot-owner access to clean the bot's messages.");
-          }
+          await ensureModeratorGuildMember(await message.guild.members.fetch(message.author.id), music);
 
           const cleaned = await cleanBotMessages(message, Number.parseInt(rest[0] ?? "", 10) || 50);
           await replyAndAutoDelete(message, `Deleted ${cleaned} bot message${cleaned === 1 ? "" : "s"}.`);
@@ -1227,7 +1235,7 @@ async function handleSlashCommand(
 
     case "voteskip":
       if (!guildId) throw new Error("This command must be used in a server.");
-      await ensureControlAccess(interaction, music);
+      await ensureModeratorAccess(interaction, music);
       const voteSkipEnabled = await music.toggleVoteSkip(
         guildId,
         interaction.options.getBoolean("enabled", false) ?? undefined
@@ -1242,7 +1250,7 @@ async function handleSlashCommand(
         await replyToInteraction(interaction, `Current prefix: \`${music.getPrefix(guildId)}\``, "Prefix");
         return;
       }
-      await ensureControlAccess(interaction, music);
+      await ensureModeratorAccess(interaction, music);
       const newPrefix = interaction.options.getString("value", true);
       await music.updateGuildSettings(guildId, { prefix: newPrefix });
       await replyToInteraction(interaction, `Prefix updated to \`${newPrefix}\`.`, "Prefix");
@@ -1277,16 +1285,13 @@ async function handleSlashCommand(
       return;
     }
 
-    case "playlist":
+    case "shock-list":
       if (!guildId) throw new Error("This command must be used in a server.");
       await handlePlaylistCommand(interaction, music);
       return;
 
     case "clean": {
-      const member = await requireGuildMember(interaction);
-      if (!music.isBotOwnerId(member.id) && !member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        throw new Error("You need Manage Messages or bot-owner access to clean the bot's messages.");
-      }
+      await ensureModeratorAccess(interaction, music);
 
       await interaction.deferReply({ ephemeral: true });
       const cleaned = await cleanBotMessages(interaction, interaction.options.getInteger("amount", false) ?? 50);
@@ -1465,10 +1470,11 @@ async function handlePrefixModerationCommand(message: Message, music: MusicManag
       return;
     }
 
-    case "maxplaylistlength": {
+    case "maxplaylistlength":
+    case "maxshocklistlength": {
       const tracks = Number.parseInt(args[1] ?? "", 10);
       if (!Number.isInteger(tracks) || tracks < 0) {
-        throw new Error("Use `moderation maxplaylistlength <tracks>`.");
+        throw new Error("Use `moderation maxshocklistlength <tracks>`.");
       }
 
       await music.updateGuildSettings(guildId, {
@@ -1476,19 +1482,8 @@ async function handlePrefixModerationCommand(message: Message, music: MusicManag
       });
       await replyAndAutoDelete(
         message,
-        tracks > 0 ? `Maximum playlist length set to ${tracks} tracks.` : "Maximum playlist length limit cleared."
+        tracks > 0 ? `Maximum shock-list length set to ${tracks} tracks.` : "Maximum shock-list length limit cleared."
       );
-      return;
-    }
-
-    case "preferaudioonly": {
-      const enabled = parseToggleValue(args[1]);
-      if (enabled === undefined) {
-        throw new Error("Use `moderation preferaudioonly <on|off>`.");
-      }
-
-      await music.updateGuildSettings(guildId, { preferAudioOnly: enabled });
-      await replyAndAutoDelete(message, `Audio-only query preference is now ${enabled ? "on" : "off"}.`);
       return;
     }
   }
@@ -1509,16 +1504,16 @@ async function handlePrefixPlaylistCommand(message: Message, music: MusicManager
   switch (subcommand) {
     case "save": {
       if (!name) {
-        throw new Error("Use `playlist save <name>`.");
+        throw new Error("Use `shock-list save <name>`.");
       }
       await music.assertCanControl(member, guildId);
       const playlist = await music.createOrReplacePlaylist(guildId, name, message.author.id);
-      await replyAndAutoDelete(message, `Saved playlist **${playlist.name}** with ${playlist.tracks.length} tracks.`);
+      await replyAndAutoDelete(message, `Saved shock-list **${playlist.name}** with ${playlist.tracks.length} tracks.`);
       return;
     }
     case "load": {
       if (!name) {
-        throw new Error("Use `playlist load <name>`.");
+        throw new Error("Use `shock-list load <name>`.");
       }
       await music.assertCanControl(member, guildId);
       const count = await music.loadPlaylistFromMessage(message, name);
@@ -1527,11 +1522,11 @@ async function handlePrefixPlaylistCommand(message: Message, music: MusicManager
     }
     case "addcurrent": {
       if (!name) {
-        throw new Error("Use `playlist addcurrent <name>`.");
+        throw new Error("Use `shock-list addcurrent <name>`.");
       }
       await music.assertCanControl(member, guildId);
       const playlist = await music.addCurrentToPlaylist(guildId, name, message.author.id);
-      await replyAndAutoDelete(message, `Playlist **${playlist.name}** now has ${playlist.tracks.length} tracks.`);
+      await replyAndAutoDelete(message, `Shock-list **${playlist.name}** now has ${playlist.tracks.length} tracks.`);
       return;
     }
     case "list": {
@@ -1540,22 +1535,22 @@ async function handlePrefixPlaylistCommand(message: Message, music: MusicManager
         message,
         playlists.length
           ? playlists.map((playlist) => `• ${playlist.name} (${playlist.tracks.length})`).join("\n")
-          : "No saved playlists yet."
+          : "No saved shock-lists yet."
       );
       return;
     }
     case "delete": {
       if (!name) {
-        throw new Error("Use `playlist delete <name>`.");
+        throw new Error("Use `shock-list delete <name>`.");
       }
       await music.assertCanControl(member, guildId);
       await music.deletePlaylist(guildId, name);
-      await replyAndAutoDelete(message, "Playlist deleted.");
+      await replyAndAutoDelete(message, "Shock-list deleted.");
       return;
     }
   }
 
-  throw new Error("Unknown playlist subcommand.");
+  throw new Error("Unknown shock-list subcommand.");
 }
 
 async function handleModerationCommand(interaction: ChatInputCommandInteraction, music: MusicManager) {
@@ -1571,17 +1566,6 @@ async function handleModerationCommand(interaction: ChatInputCommandInteraction,
     case "show":
       await replyToInteraction(interaction, { ...embedTextPayload(formatModerationSummary(music, guildId), { title: "Moderation Settings" }), ephemeral: true });
       return;
-
-    case "preferaudioonly": {
-      const enabled = interaction.options.getBoolean("enabled", true);
-      await music.updateGuildSettings(guildId, { preferAudioOnly: enabled });
-      await replyToInteraction(
-        interaction,
-        `Audio-only query preference is now ${enabled ? "on" : "off"}.`,
-        "Moderation Updated"
-      );
-      return;
-    }
 
     case "channelmessages": {
       const enabled = interaction.options.getBoolean("enabled", true);
@@ -1648,7 +1632,7 @@ async function handleModerationCommand(interaction: ChatInputCommandInteraction,
       return;
     }
 
-    case "maxplaylistlength": {
+    case "maxshocklistlength": {
       const tracks = interaction.options.getInteger("tracks", true);
       await music.updateGuildSettings(guildId, {
         maxPlaylistLength: tracks > 0 ? tracks : undefined
@@ -1656,8 +1640,8 @@ async function handleModerationCommand(interaction: ChatInputCommandInteraction,
       await replyToInteraction(
         interaction,
         tracks > 0
-          ? `Maximum playlist length set to ${tracks} tracks.`
-          : "Maximum playlist length limit cleared.",
+          ? `Maximum shock-list length set to ${tracks} tracks.`
+          : "Maximum shock-list length limit cleared.",
         "Moderation Updated"
       );
       return;
@@ -1680,13 +1664,13 @@ async function handlePlaylistCommand(interaction: ChatInputCommandInteraction, m
         interaction.options.getString("name", true),
         interaction.user.id
       );
-      await replyToInteraction(interaction, `Saved playlist **${playlist.name}** with ${playlist.tracks.length} tracks.`, "Playlist Updated");
+      await replyToInteraction(interaction, `Saved shock-list **${playlist.name}** with ${playlist.tracks.length} tracks.`, "Shock-list Updated");
       return;
     }
     case "load": {
       await ensureControlAccess(interaction, music);
       const count = await music.loadPlaylist(interaction, interaction.options.getString("name", true));
-      await replyToInteraction(interaction, `Loaded ${count} track${count === 1 ? "" : "s"} into the queue.`, "Playlist Updated");
+      await replyToInteraction(interaction, `Loaded ${count} track${count === 1 ? "" : "s"} into the queue.`, "Shock-list Updated");
       return;
     }
     case "addcurrent": {
@@ -1696,7 +1680,7 @@ async function handlePlaylistCommand(interaction: ChatInputCommandInteraction, m
         interaction.options.getString("name", true),
         interaction.user.id
       );
-      await replyToInteraction(interaction, `Playlist **${playlist.name}** now has ${playlist.tracks.length} tracks.`, "Playlist Updated");
+      await replyToInteraction(interaction, `Shock-list **${playlist.name}** now has ${playlist.tracks.length} tracks.`, "Shock-list Updated");
       return;
     }
     case "list": {
@@ -1705,15 +1689,15 @@ async function handlePlaylistCommand(interaction: ChatInputCommandInteraction, m
         interaction,
         playlists.length
           ? playlists.map((playlist) => `• ${playlist.name} (${playlist.tracks.length})`).join("\n")
-          : "No saved playlists yet.",
-        "Saved Playlists"
+          : "No saved shock-lists yet.",
+        "Saved Shock-lists"
       );
       return;
     }
     case "delete":
       await ensureControlAccess(interaction, music);
       await music.deletePlaylist(guildId, interaction.options.getString("name", true));
-      await replyToInteraction(interaction, "Playlist deleted.", "Playlist Updated");
+      await replyToInteraction(interaction, "Shock-list deleted.", "Shock-list Updated");
       return;
   }
 }

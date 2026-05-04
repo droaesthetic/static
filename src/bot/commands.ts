@@ -30,7 +30,7 @@ export const registeredCommandNames = [
   "filter",
   "prefix",
   "permissions",
-  "playlist",
+  "shock-list",
   "clean",
   "moderation",
   "owner"
@@ -145,7 +145,7 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("voteskip")
-    .setDescription("Toggle vote skip mode for this guild.")
+    .setDescription("Moderators: toggle vote skip mode for this server.")
     .addBooleanOption((option) =>
       option.setName("enabled").setDescription("Whether vote skip should be enabled").setRequired(false)
     ),
@@ -169,28 +169,28 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("prefix")
-    .setDescription("Show or update the guild prefix.")
+    .setDescription("Show or set the guild text-command prefix.")
     .addSubcommand((subcommand) =>
       subcommand.setName("show").setDescription("Show the current prefix.")
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("set")
-        .setDescription("Set the text-command prefix.")
+        .setDescription("Moderators: set the text-command prefix.")
         .addStringOption((option) =>
           option.setName("value").setDescription("New prefix").setRequired(true).setMaxLength(5)
         )
     ),
   new SlashCommandBuilder()
     .setName("permissions")
-    .setDescription("Guild-level music permissions.")
+    .setDescription("Moderators: guild music permission mode and DJ role.")
     .addSubcommand((subcommand) =>
-      subcommand.setName("show").setDescription("Show current guild music permissions.")
+      subcommand.setName("show").setDescription("Moderators: show current guild music permissions.")
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("mode")
-        .setDescription("Set who can manage the player.")
+        .setDescription("Moderators: set who can manage the player.")
         .addStringOption((option) =>
           option
             .setName("value")
@@ -206,52 +206,52 @@ const commands = [
     .addSubcommand((subcommand) =>
       subcommand
         .setName("djrole")
-        .setDescription("Set or clear the DJ role.")
+        .setDescription("Moderators: set or clear the DJ role.")
         .addRoleOption((option) =>
           option.setName("role").setDescription("Role allowed to control the player").setRequired(false)
         )
     ),
   new SlashCommandBuilder()
-    .setName("playlist")
-    .setDescription("Manage saved playlists.")
+    .setName("shock-list")
+    .setDescription("Manage saved shock-lists.")
     .addSubcommand((subcommand) =>
       subcommand
         .setName("save")
-        .setDescription("Save the current queue as a playlist.")
+        .setDescription("Save the current queue as a shock-list.")
         .addStringOption((option) =>
-          option.setName("name").setDescription("Playlist name").setRequired(true).setMaxLength(50)
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
         )
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("load")
-        .setDescription("Load a saved playlist into the queue.")
+        .setDescription("Load a saved shock-list into the queue.")
         .addStringOption((option) =>
-          option.setName("name").setDescription("Playlist name").setRequired(true).setMaxLength(50)
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
         )
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("addcurrent")
-        .setDescription("Add the current track to a playlist.")
+        .setDescription("Add the current track to a shock-list.")
         .addStringOption((option) =>
-          option.setName("name").setDescription("Playlist name").setRequired(true).setMaxLength(50)
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
         )
     )
     .addSubcommand((subcommand) =>
-      subcommand.setName("list").setDescription("List saved playlists for this guild.")
+      subcommand.setName("list").setDescription("List saved shock-lists for this guild.")
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("delete")
-        .setDescription("Delete a saved playlist.")
+        .setDescription("Delete a saved shock-list.")
         .addStringOption((option) =>
-          option.setName("name").setDescription("Playlist name").setRequired(true).setMaxLength(50)
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
         )
     ),
   new SlashCommandBuilder()
     .setName("clean")
-    .setDescription("Delete the bot's recent messages in this text or voice chat.")
+    .setDescription("Moderators: delete the bot's recent messages in this text or voice chat.")
     .addIntegerOption((option) =>
       option.setName("amount").setDescription("How many recent messages to inspect").setRequired(false).setMinValue(1).setMaxValue(100)
     ),
@@ -349,18 +349,10 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("maxplaylistlength")
-        .setDescription("Set the maximum allowed playlist size in tracks. Use 0 to clear.")
+        .setName("maxshocklistlength")
+        .setDescription("Set the maximum allowed shock-list size in tracks. Use 0 to clear.")
         .addIntegerOption((option) =>
-          option.setName("tracks").setDescription("Maximum tracks per playlist").setRequired(true).setMinValue(0).setMaxValue(500)
-        )
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("preferaudioonly")
-        .setDescription("Prefer audio-only results for text search queries.")
-        .addBooleanOption((option) =>
-          option.setName("enabled").setDescription("Whether audio-only query preference is enabled").setRequired(true)
+          option.setName("tracks").setDescription("Maximum tracks per shock-list").setRequired(true).setMinValue(0).setMaxValue(500)
         )
     ),
   new SlashCommandBuilder()

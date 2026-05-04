@@ -38,7 +38,6 @@ function createDefaultGuildSettings(guildId: string): GuildSettings {
     prefix: defaultPrefix,
     autoplay: false,
     voteSkipEnabled: false,
-    preferAudioOnly: true,
     permissionMode: "everyone",
     disabledCommands: [],
     channelSettings: {},
@@ -146,11 +145,18 @@ export class MusicManager {
 
   async setCommandEnabled(guildId: string, commandName: string, enabled: boolean) {
     const settings = this.getGuildSettings(guildId);
-    const normalizedName = commandName.toLowerCase();
+    let normalizedName = commandName.toLowerCase();
+    if (normalizedName === "playlist") {
+      normalizedName = "shock-list";
+    }
+
     const disabledCommands = new Set(settings.disabledCommands.map((entry) => entry.toLowerCase()));
 
     if (enabled) {
       disabledCommands.delete(normalizedName);
+      if (normalizedName === "shock-list") {
+        disabledCommands.delete("playlist");
+      }
     } else {
       disabledCommands.add(normalizedName);
     }
@@ -204,8 +210,7 @@ export class MusicManager {
     const track = await this.resolver.resolve({
       query: normalizedQuery,
       requestedBy: interaction.user.username,
-      requestedById: interaction.user.id,
-      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
+      requestedById: interaction.user.id
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -231,14 +236,13 @@ export class MusicManager {
 
     const player = await this.ensurePlayer(guild, voiceChannel, interaction.channelId);
     if (this.isPlaylistUrl(normalizedQuery)) {
-      throw new Error("Use `play` for playlists. `insert` only supports one track at a time.");
+      throw new Error("Use `play` for multi-track links (e.g. Spotify or YouTube lists). `insert` only supports one track at a time.");
     }
 
     const track = await this.resolver.resolve({
       query: normalizedQuery,
       requestedBy: interaction.user.username,
-      requestedById: interaction.user.id,
-      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
+      requestedById: interaction.user.id
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -322,8 +326,7 @@ export class MusicManager {
     const track = await this.resolver.resolve({
       query: normalizedQuery,
       requestedBy: message.author.username,
-      requestedById: message.author.id,
-      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
+      requestedById: message.author.id
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -349,14 +352,13 @@ export class MusicManager {
 
     const player = await this.ensurePlayer(guild, voiceChannel, message.channelId);
     if (this.isPlaylistUrl(normalizedQuery)) {
-      throw new Error("Use `play` for playlists. `insert` only supports one track at a time.");
+      throw new Error("Use `play` for multi-track links (e.g. Spotify or YouTube lists). `insert` only supports one track at a time.");
     }
 
     const track = await this.resolver.resolve({
       query: normalizedQuery,
       requestedBy: message.author.username,
-      requestedById: message.author.id,
-      preferAudioOnly: this.shouldPreferAudioOnly(guild.id, normalizedQuery)
+      requestedById: message.author.id
     });
     this.assertTrackWithinLimit(guild.id, track);
 
@@ -428,7 +430,7 @@ export class MusicManager {
         encodedTrack: track.encoded,
         addedAt: new Date().toISOString()
       };
-      this.assertTrackWithinLimit(guildId, resolved, `The playlist track **${resolved.title}**`);
+      this.assertTrackWithinLimit(guildId, resolved, `The queued playlist track **${resolved.title}**`);
       return resolved;
     });
 
@@ -493,16 +495,6 @@ export class MusicManager {
     const trimmed = query.trim();
     const bracketedUrl = trimmed.match(/^<\s*(https?:\/\/[^>]+)\s*>$/i)?.[1];
     return bracketedUrl ?? trimmed;
-  }
-
-  private shouldPreferAudioOnly(guildId: string, query: string) {
-    const settings = this.getGuildSettings(guildId);
-    if (!settings.preferAudioOnly) {
-      return false;
-    }
-
-    const parsed = this.parseHttpUrl(query);
-    return !parsed;
   }
 
   private async normalizePlayableUrlForResolution(query: string) {
@@ -727,11 +719,11 @@ export class MusicManager {
 
     const playlist = this.store.getPlaylist(guildId, name);
     if (!playlist) {
-      throw new Error("That playlist does not exist.");
+      throw new Error("That shock-list does not exist.");
     }
     this.assertPlaylistWithinLimit(guildId, playlist.tracks.length);
     for (const track of playlist.tracks) {
-      this.assertTrackWithinLimit(guildId, track, `The playlist track **${track.title}**`);
+      this.assertTrackWithinLimit(guildId, track, `The shock-list track **${track.title}**`);
     }
 
     const guild = interaction.guild;
@@ -766,12 +758,12 @@ export class MusicManager {
 
     const playlist = this.store.getPlaylist(guild.id, name);
     if (!playlist) {
-      throw new Error("That playlist does not exist.");
+      throw new Error("That shock-list does not exist.");
     }
 
     this.assertPlaylistWithinLimit(guild.id, playlist.tracks.length);
     for (const track of playlist.tracks) {
-      this.assertTrackWithinLimit(guild.id, track, `The playlist track **${track.title}**`);
+      this.assertTrackWithinLimit(guild.id, track, `The shock-list track **${track.title}**`);
     }
 
     const member = await guild.members.fetch(message.author.id);
@@ -899,7 +891,16 @@ export class MusicManager {
       throw new Error("You are not allowed to use this bot in this server.");
     }
 
-    if (settings.disabledCommands.includes(commandName.toLowerCase())) {
+    const cmd = commandName.toLowerCase();
+    const disabled = new Set(settings.disabledCommands.map((entry) => entry.toLowerCase()));
+    const shockListDisabled =
+      disabled.has("shock-list")
+      || disabled.has("playlist");
+    const commandDisabled =
+      disabled.has(cmd)
+      || ((cmd === "shock-list" || cmd === "playlist") && shockListDisabled);
+
+    if (commandDisabled) {
       throw new Error(`The \`${commandName}\` command is disabled in this server.`);
     }
 
@@ -1016,7 +1017,7 @@ export class MusicManager {
     }
 
     if (trackCount > maxPlaylistLength) {
-      throw new Error(`That playlist is too large for this server (${trackCount} tracks > ${maxPlaylistLength}).`);
+      throw new Error(`That shock-list is too large for this server (${trackCount} tracks > ${maxPlaylistLength}).`);
     }
   }
 }

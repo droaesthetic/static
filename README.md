@@ -96,7 +96,7 @@ To keep it working, your PC needs to stay on and connected to the internet.
 - `/voteskip enabled:<optional boolean>`
 - `/prefix show|set`
 - `/permissions show|mode|djrole`
-- `/playlist save|load|addcurrent|list|delete`
+- `/shock-list save|load|addcurrent|list|delete`
 - `/clean amount:<optional>`
 
 ## Prefix commands
@@ -169,7 +169,7 @@ For Render:
    - `DASHBOARD_PUBLIC_URL`
 4. After the first deploy, add your custom domain in Render:
    - `Settings -> Custom Domains -> Add Custom Domain`
-   - enter `drotunes.xyz` or `dashboard.drotunes.xyz`
+   - enter `static.xyz` or `dashboard.static.xyz`
 5. Copy the DNS target Render gives you and add it at your registrar.
 6. Update `DASHBOARD_PUBLIC_URL` to the final `https://...` domain and redeploy.
 

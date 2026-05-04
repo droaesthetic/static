@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: dro-tunes
+    name: static
     runtime: node
     plan: free
     buildCommand: npm install --ignore-scripts && npm run build

@@ -33,7 +33,7 @@ try {
   $env:DASHBOARD_PORT = "$port"
   $env:DASHBOARD_PUBLIC_URL = "http://localhost:$port"
 
-  Write-Host "Starting Dro Tunes locally..." -ForegroundColor Green
+  Write-Host "Starting Static locally..." -ForegroundColor Green
   Write-Host "Dashboard: http://localhost:$port" -ForegroundColor Cyan
   Write-Host "Startup log: $logPath" -ForegroundColor DarkGray
 
@@ -53,7 +53,7 @@ try {
   }
 } catch {
   Write-Host ""
-  Write-Host "Dro Tunes could not start:" -ForegroundColor Red
+  Write-Host "Static could not start:" -ForegroundColor Red
   Write-Host $_ -ForegroundColor Red
   Write-Host ""
   Write-Host "The error was saved to: $logPath" -ForegroundColor Yellow

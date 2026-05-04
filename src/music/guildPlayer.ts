@@ -154,9 +154,9 @@ export class GuildPlayer {
   /**
    * Teardown playback without nesting `runExclusive` — safe to await from handlers that already run on the player's operation chain.
    */
-  private async haltPlaybackSession(reason?: string) {
-    if (reason) {
-      console.error(`[lavalink:${this.guild.id}] ${reason}`);
+  private async haltPlaybackSession(options?: { logReason?: string; announceInChannel?: boolean }) {
+    if (options?.logReason) {
+      console.error(`[lavalink:${this.guild.id}] ${options.logReason}`);
     }
 
     this.clearPlaybackFailures();
@@ -174,6 +174,11 @@ export class GuildPlayer {
     this.stopPlaybackWatchdog();
     await this.deleteNowPlayingMessage();
     await this.deleteQueueEmptyMessage();
+
+    if (options?.announceInChannel) {
+      await this.sendAutoHaltAnnouncement();
+    }
+
     this.voiceChannelId = undefined;
     await this.persist();
   }
@@ -495,9 +500,11 @@ export class GuildPlayer {
       } catch (error) {
         console.error(`[lavalink:${this.guild.id}] failed to start queued track "${next.title}"`, error);
         if (this.recordPlaybackFailure()) {
-          await this.haltPlaybackSession(
-            "Too many playback or start failures in a short window — stopping the voice session before the queue can tight-loop."
-          );
+          await this.haltPlaybackSession({
+            logReason:
+              "Too many playback or start failures in a short window — stopping the voice session before the queue can tight-loop.",
+            announceInChannel: true
+          });
           return;
         }
       }
@@ -584,9 +591,11 @@ export class GuildPlayer {
     }
 
     if (this.recordPlaybackFailure()) {
-      await this.haltPlaybackSession(
-        "Repeated stuck tracks — stopping the voice session to avoid looping through bad sources."
-      );
+      await this.haltPlaybackSession({
+        logReason:
+          "Repeated stuck tracks — stopping the voice session to avoid looping through bad sources.",
+        announceInChannel: true
+      });
       return;
     }
 
@@ -601,9 +610,11 @@ export class GuildPlayer {
     }
 
     if (this.recordPlaybackFailure()) {
-      await this.haltPlaybackSession(
-        "Repeated Lavalink track exceptions (often source/parsing failures) — stopping the voice session to avoid a skip loop."
-      );
+      await this.haltPlaybackSession({
+        logReason:
+          "Repeated Lavalink track exceptions (often source/parsing failures) — stopping the voice session to avoid a skip loop.",
+        announceInChannel: true
+      });
       return;
     }
 
@@ -755,6 +766,27 @@ export class GuildPlayer {
     });
     this.queueEmptyMessageId = message.id;
     this.queueEmptyMessageChannelId = channel.id;
+  }
+
+  /**
+   * Shown when the player stops itself after repeated Lavalink/source failures.
+   * Ignores “bot messages off” for this channel — users should always see why playback died.
+   */
+  private async sendAutoHaltAnnouncement() {
+    const channel = await this.getAnnouncementChannel(this.textChannelId, true);
+    if (!channel) {
+      return;
+    }
+
+    const body =
+      "**Playback stopped automatically** after too many errors in a short time. That often happens when tracks fail to load or decode — for example outdated Lavalink / YouTube plugin issues, restricted videos, or bad links.\n\n"
+      + "The queue was cleared and the bot left the voice channel. Try another song, or update your Lavalink node if this keeps happening.";
+
+    await channel
+      .send({
+        ...embedTextPayload(body, { title: "Player stopped", tone: "warning" })
+      })
+      .catch(() => undefined);
   }
 
   private async deleteNowPlayingMessage(channel?: Awaited<ReturnType<GuildPlayer["getAnnouncementChannel"]>>) {

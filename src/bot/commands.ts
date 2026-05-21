@@ -3,13 +3,25 @@ import { appConfig } from "../config.js";
 
 export const registeredCommandNames = [
   "play",
+  "play-file",
   "insert",
   "join",
   "pause",
   "resume",
   "stop",
+  "disconnect",
   "clear",
   "queue",
+  "history",
+  "help",
+  "commands",
+  "fix", 
+  "restart",  
+  "reboot",  
+  "lavaboot",  
+  "synccommands",  
+  "removeafterplayed",  
+  "sessionsettings",
   "nowplaying",
   "search",
   "lyrics",
@@ -32,45 +44,70 @@ export const registeredCommandNames = [
   "permissions",
   "shock-list",
   "clean",
-  "moderation",
-  "owner"
-] as const;
+  "moderation", 
+  "subscribe",
+  "solo",
+  "247",
+  "owner" 
+] as const; 
 
 const commands = [
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Queue a track from a URL, search query, or uploaded file.")
+    .setDescription("Queue a track from a URL or search query.")
+    .addStringOption((option) =>
+      option.setName("song").setDescription("A song URL or search terms").setRequired(true).setAutocomplete(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("play-file")
+    .setDescription("Queue an uploaded audio or video file.")
+    .addAttachmentOption((option) =>
+      option.setName("file").setDescription("An uploaded audio or video file").setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("insert")
+    .setDescription("Insert a track into the next spot in the queue.")
     .addSubcommand((subcommand) =>
       subcommand
         .setName("query")
-        .setDescription("Queue a song from a URL or search terms.")
+        .setDescription("Insert a track from a URL or search query.")
         .addStringOption((option) =>
-          option.setName("value").setDescription("A song URL or search terms").setRequired(true)
+          option.setName("query").setDescription("A song URL or search terms").setRequired(true)
         )
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("file")
-        .setDescription("Queue an uploaded audio or video file.")
+        .setDescription("Insert an uploaded audio or video file.")
         .addAttachmentOption((option) =>
-          option.setName("value").setDescription("An uploaded audio or video file").setRequired(true)
+          option.setName("file").setDescription("An uploaded audio or video file").setRequired(true)
         )
-    ),
-  new SlashCommandBuilder()
-    .setName("insert")
-    .setDescription("Insert a track into the next spot in the queue.")
-    .addStringOption((option) =>
-      option.setName("query").setDescription("A song URL or search terms").setRequired(false)
-    )
-    .addAttachmentOption((option) =>
-      option.setName("file").setDescription("An uploaded audio or video file").setRequired(false)
     ),
   new SlashCommandBuilder().setName("join").setDescription("Join your current voice channel."),
   new SlashCommandBuilder().setName("pause").setDescription("Pause playback."),
   new SlashCommandBuilder().setName("resume").setDescription("Resume playback."),
-  new SlashCommandBuilder().setName("stop").setDescription("Stop playback and disconnect."),
+  new SlashCommandBuilder().setName("stop").setDescription("Stop playback and clear the queue."),
+  new SlashCommandBuilder().setName("disconnect").setDescription("Disconnect from the voice channel."),
   new SlashCommandBuilder().setName("clear").setDescription("Clear the queue."),
-  new SlashCommandBuilder().setName("queue").setDescription("Show the current queue."),
+  new SlashCommandBuilder().setName("queue").setDescription("Show played, current, and upcoming songs."),
+  new SlashCommandBuilder().setName("history").setDescription("Show songs played in this guild during the past 14 days."),
+  new SlashCommandBuilder().setName("help").setDescription("Get help using the bot."),
+  new SlashCommandBuilder().setName("commands").setDescription("Show a command cheat sheet."),
+  new SlashCommandBuilder().setName("fix").setDescription("Run automatic playback recovery checks if the bot seems glitchy."), 
+  new SlashCommandBuilder().setName("restart").setDescription("Restart the currently playing song."),  
+  new SlashCommandBuilder().setName("reboot").setDescription("Bot managers: reboot the bot process."),   
+  new SlashCommandBuilder().setName("lavaboot").setDescription("Bot managers: restart the local Lavalink process."),   
+  new SlashCommandBuilder().setName("synccommands").setDescription("Bot managers: re-register the bot's slash commands."), 
+  new SlashCommandBuilder() 
+    .setName("removeafterplayed")
+    .setDescription("Toggle whether already-played songs are hidden from the queue view.")
+    .addSubcommand((subcommand) =>
+      subcommand.setName("on").setDescription("Hide already-played songs in queue.")
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("off").setDescription("Show already-played songs in queue.")
+    ),
+  new SlashCommandBuilder().setName("sessionsettings").setDescription("Show playback and server session settings."),
   new SlashCommandBuilder().setName("nowplaying").setDescription("Show the current track."),
   new SlashCommandBuilder()
     .setName("search")
@@ -87,61 +124,64 @@ const commands = [
   new SlashCommandBuilder().setName("save").setDescription("DM yourself the current song."),
   new SlashCommandBuilder()
     .setName("volume")
-    .setDescription("Set the playback volume.")
+    .setDescription("Moderators: set the playback volume.")
     .addIntegerOption((option) =>
       option.setName("percent").setDescription("Volume from 1 to 150").setRequired(true).setMinValue(1).setMaxValue(150)
     ),
   new SlashCommandBuilder()
-    .setName("skip")
-    .setDescription("Skip the current track or vote skip.")
-    .addIntegerOption((option) =>
-      option.setName("to").setDescription("Skip directly to this queue position").setRequired(false).setMinValue(1)
-    ),
-  new SlashCommandBuilder()
-    .setName("remove")
-    .setDescription("Remove a track from the queue.")
-    .addIntegerOption((option) =>
-      option.setName("index").setDescription("Queue position to remove").setRequired(true).setMinValue(1)
-    ),
-  new SlashCommandBuilder()
-    .setName("move")
-    .setDescription("Move a track to a different position in the queue.")
-    .addIntegerOption((option) =>
-      option.setName("from").setDescription("Current queue position").setRequired(true).setMinValue(1)
-    )
-    .addIntegerOption((option) =>
-      option.setName("to").setDescription("New queue position").setRequired(true).setMinValue(1)
-    ),
+    .setName("skip") 
+    .setDescription("Skip the current track or vote skip.") 
+    .addIntegerOption((option) => 
+      option.setName("to").setDescription("Skip to this /queue display position").setRequired(false).setMinValue(1) 
+    ), 
+  new SlashCommandBuilder() 
+    .setName("remove") 
+    .setDescription("Remove a track from the queue.") 
+    .addIntegerOption((option) => 
+      option.setName("index").setDescription("/queue display position to remove").setRequired(true).setMinValue(1) 
+    ), 
+  new SlashCommandBuilder() 
+    .setName("move") 
+    .setDescription("Move a track to a different position in the queue.") 
+    .addIntegerOption((option) => 
+      option.setName("from").setDescription("Current /queue display position").setRequired(true).setMinValue(1) 
+    ) 
+    .addIntegerOption((option) => 
+      option.setName("to").setDescription("New /queue display position").setRequired(true).setMinValue(1) 
+    ), 
   new SlashCommandBuilder().setName("removelast").setDescription("Remove the last track in the queue."),
   new SlashCommandBuilder().setName("removeduplicates").setDescription("Remove duplicate tracks from the queue."),
   new SlashCommandBuilder().setName("removeabsent").setDescription("Remove queued tracks from users no longer in voice."),
   new SlashCommandBuilder()
     .setName("massremove")
-    .setDescription("Remove a block of tracks from the queue.")
-    .addIntegerOption((option) =>
-      option.setName("start").setDescription("First queue position to remove").setRequired(true).setMinValue(1)
-    )
+    .setDescription("Remove a block of tracks from the queue.") 
+    .addIntegerOption((option) => 
+      option.setName("start").setDescription("First /queue display position to remove").setRequired(true).setMinValue(1) 
+    ) 
     .addIntegerOption((option) =>
       option.setName("count").setDescription("How many tracks to remove").setRequired(true).setMinValue(1)
     ),
   new SlashCommandBuilder().setName("previous").setDescription("Play the previous track again."),
-  new SlashCommandBuilder()
-    .setName("fastforward")
-    .setDescription("Jump forward in the current track.")
-    .addIntegerOption((option) =>
-      option.setName("seconds").setDescription("Seconds to jump").setRequired(true).setMinValue(1).setMaxValue(600)
-    ),
-  new SlashCommandBuilder()
-    .setName("rewind")
-    .setDescription("Jump backward in the current track.")
-    .addIntegerOption((option) =>
-      option.setName("seconds").setDescription("Seconds to jump").setRequired(true).setMinValue(1).setMaxValue(600)
-    ),
+  new SlashCommandBuilder() 
+    .setName("fastforward") 
+    .setDescription("Jump forward in the current track.") 
+    .addStringOption((option) => 
+      option.setName("duration").setDescription("How far to jump, like 30s, 1m, or 1m30s").setRequired(true).setMaxLength(16) 
+    ), 
+  new SlashCommandBuilder() 
+    .setName("rewind") 
+    .setDescription("Jump backward in the current track.") 
+    .addStringOption((option) => 
+      option.setName("duration").setDescription("How far to jump, like 30s, 1m, or 1m30s").setRequired(true).setMaxLength(16) 
+    ), 
   new SlashCommandBuilder()
     .setName("autoplay")
     .setDescription("Toggle autoplay for this guild.")
-    .addBooleanOption((option) =>
-      option.setName("enabled").setDescription("Whether autoplay should be enabled").setRequired(true)
+    .addSubcommand((subcommand) =>
+      subcommand.setName("on").setDescription("Turn autoplay on.")
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("off").setDescription("Turn autoplay off.")
     ),
   new SlashCommandBuilder()
     .setName("voteskip")
@@ -149,9 +189,9 @@ const commands = [
     .addBooleanOption((option) =>
       option.setName("enabled").setDescription("Whether vote skip should be enabled").setRequired(false)
     ),
-  new SlashCommandBuilder()
-    .setName("filter")
-    .setDescription("Apply or clear a playback filter preset.")
+  new SlashCommandBuilder() 
+    .setName("filter") 
+    .setDescription("PREMIUM: Apply or clear a playback filter preset.") 
     .addStringOption((option) =>
       option
         .setName("preset")
@@ -167,18 +207,53 @@ const commands = [
           { name: "8d", value: "8d" }
         )
     ),
-  new SlashCommandBuilder()
-    .setName("prefix")
-    .setDescription("Show or set the guild text-command prefix.")
-    .addSubcommand((subcommand) =>
-      subcommand.setName("show").setDescription("Show the current prefix.")
+  new SlashCommandBuilder() 
+    .setName("prefix") 
+    .setDescription("Show or update guild text-command prefixes.") 
+    .addSubcommandGroup((group) =>
+      group
+        .setName("self")
+        .setDescription("PREMIUM: Set, remove, or show your personal prefix.")
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("set")
+            .setDescription("PREMIUM: Set your personal prefix.")
+            .addStringOption((option) =>
+              option.setName("value").setDescription("Your personal prefix").setRequired(true).setMaxLength(5)
+            )
+        )
+        .addSubcommand((subcommand) =>
+          subcommand.setName("remove").setDescription("PREMIUM: Remove your personal prefix.")
+        )
+        .addSubcommand((subcommand) =>
+          subcommand.setName("show").setDescription("PREMIUM: Show your personal prefix.")
+        )
+    )
+    .addSubcommand((subcommand) => 
+      subcommand.setName("show").setDescription("Show the current prefixes.") 
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("set")
-        .setDescription("Moderators: set the text-command prefix.")
+        .setDescription("Moderators: replace all prefixes with one prefix.")
         .addStringOption((option) =>
           option.setName("value").setDescription("New prefix").setRequired(true).setMaxLength(5)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("add")
+        .setDescription("Moderators: add another text-command prefix.")
+        .addStringOption((option) =>
+          option.setName("value").setDescription("Prefix to add").setRequired(true).setMaxLength(5)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("remove")
+        .setDescription("Moderators: remove a text-command prefix.")
+        .addStringOption((option) =>
+          option.setName("value").setDescription("Prefix to remove").setRequired(true).setMaxLength(5)
         )
     ),
   new SlashCommandBuilder()
@@ -230,17 +305,58 @@ const commands = [
           option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
         )
     )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("addcurrent")
-        .setDescription("Add the current track to a shock-list.")
-        .addStringOption((option) =>
-          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50)
-        )
-    )
-    .addSubcommand((subcommand) =>
-      subcommand.setName("list").setDescription("List saved shock-lists for this guild.")
-    )
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("addcurrent") 
+        .setDescription("Add the current track to a shock-list.") 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("addlink") 
+        .setDescription("Add one song link to one of your shock-lists.") 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+        .addStringOption((option) => 
+          option.setName("link").setDescription("Song link").setRequired(true) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("addplaylist") 
+        .setDescription("Add a playlist link to one of your shock-lists.") 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+        .addStringOption((option) => 
+          option.setName("link").setDescription("Playlist link").setRequired(true) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("view") 
+        .setDescription("View the songs in one of your shock-lists.") 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("remove") 
+        .setDescription("Remove a song from one of your shock-lists.") 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+        .addIntegerOption((option) => 
+          option.setName("song").setDescription("Song number from shock-list view").setRequired(true).setMinValue(1) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand.setName("list").setDescription("List your saved shock-lists.") 
+    ) 
     .addSubcommand((subcommand) =>
       subcommand
         .setName("delete")
@@ -314,6 +430,22 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("privateresponses")
+        .setDescription("Choose whether normally-private bot responses are private or public.")
+        .addBooleanOption((option) =>
+          option.setName("public").setDescription("Whether private bot responses should be sent publicly").setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("autodelete")
+        .setDescription("Enable or disable auto-delete for bot responses in this server.")
+        .addBooleanOption((option) =>
+          option.setName("enabled").setDescription("Whether bot responses should auto-delete").setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("member")
         .setDescription("Allow, deny, or clear a member's bot access override.")
         .addUserOption((option) =>
@@ -356,15 +488,74 @@ const commands = [
         )
     ),
   new SlashCommandBuilder()
-    .setName("owner")
-    .setDescription("Bot-owner-only global commands.")
-    .addSubcommand((subcommand) =>
-      subcommand.setName("status").setDescription("Show bot owner status and runtime information.")
+    .setName("subscribe")
+    .setDescription("Get the $4.99/month premium checkout link."),
+  new SlashCommandBuilder()
+    .setName("solo")
+    .setDescription("PREMIUM: Toggle solo session for your current voice session.")
+    .addStringOption((option) =>
+      option
+        .setName("mode")
+        .setDescription("Solo session mode")
+        .setRequired(true)
+        .addChoices(
+          { name: "on", value: "on" },
+          { name: "off", value: "off" }
+        )
+    ),
+  new SlashCommandBuilder()
+    .setName("247")
+    .setDescription("PREMIUM: Toggle 24/7 voice for the current voice channel.")
+    .addStringOption((option) =>
+      option
+        .setName("mode")
+        .setDescription("24/7 voice mode")
+        .setRequired(true)
+        .addChoices(
+          { name: "on", value: "on" },
+          { name: "off", value: "off" }
+        )
+    ),
+  new SlashCommandBuilder()   
+    .setName("owner")  
+    .setDescription("Bot management global commands.")  
+    .addSubcommand((subcommand) =>  
+      subcommand.setName("shocklists").setDescription("List every saved shock-list.")  
+    )  
+    .addSubcommand((subcommand) =>  
+      subcommand  
+        .setName("removeaccess")  
+        .setDescription("Globally remove a user's access to use this bot.")  
+        .addUserOption((option) =>  
+          option.setName("user").setDescription("The user to block from using the bot").setRequired(true)  
+        )  
     )
-    .addSubcommand((subcommand) =>
-      subcommand.setName("synccommands").setDescription("Re-register the bot's slash commands.")
-    )
-].map((command) => command.toJSON());
+    .addSubcommand((subcommand) =>  
+      subcommand.setName("premiumlist").setDescription("List premium users.")  
+    )  
+    .addSubcommand((subcommand) =>  
+      subcommand  
+        .setName("shocklistview")  
+        .setDescription("View any user's shock-list.") 
+        .addUserOption((option) => 
+          option.setName("owner").setDescription("Shock-list owner").setRequired(true) 
+        ) 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+    ) 
+    .addSubcommand((subcommand) => 
+      subcommand 
+        .setName("shocklistload") 
+        .setDescription("Load any user's shock-list into the queue.") 
+        .addUserOption((option) => 
+          option.setName("owner").setDescription("Shock-list owner").setRequired(true) 
+        ) 
+        .addStringOption((option) => 
+          option.setName("name").setDescription("Shock-list name").setRequired(true).setMaxLength(50) 
+        ) 
+    ) 
+].map((command) => command.toJSON()); 
 
 export async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(appConfig.discordToken);

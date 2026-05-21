@@ -38,10 +38,17 @@ try {
   Write-Host "Startup log: $logPath" -ForegroundColor DarkGray
 
   $restartDelaySeconds = 5
+  $botRestartExitCode = 42
 
   while ($true) {
     & "C:\Program Files\nodejs\npm.cmd" run dev:local
     $exitCode = $LASTEXITCODE
+
+    if ($exitCode -eq $botRestartExitCode) {
+      Write-Host "Bot requested a reboot. Restarting in $restartDelaySeconds seconds..." -ForegroundColor Yellow
+      Start-Sleep -Seconds $restartDelaySeconds
+      continue
+    }
 
     if ($exitCode -eq 0) {
       Write-Host "Bot stopped cleanly." -ForegroundColor Yellow

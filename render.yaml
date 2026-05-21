@@ -19,6 +19,8 @@ services:
         sync: false
       - key: BOT_OWNERS
         sync: false
+      - key: BOT_MANAGERS
+        sync: false
       - key: DEFAULT_VOLUME
         value: "75"
       - key: MAX_QUEUE_SIZE

@@ -41,6 +41,7 @@
           </div>
           <span class="pill volume-pill"></span>
         </div>
+        <div class="server-meta"></div>
         <div class="now-playing"></div>
         <div class="controls">
           <button data-action="pause">Pause</button>
@@ -52,7 +53,30 @@
           <span>Volume</span>
           <input data-volume type="range" min="1" max="150" />
         </label>
-        <div class="queue"></div>
+        <section class="dashboard-section">
+          <div class="section-head">
+            <h3>Queue</h3>
+          </div>
+          <div class="queue"></div>
+        </section>
+        <section class="dashboard-section">
+          <div class="section-head">
+            <h3>Voice Channel History</h3>
+            <button class="secondary-button" data-toggle-voice-history type="button" aria-expanded="false">Show voice history</button>
+          </div>
+          <div class="voice-history activity-list is-hidden">
+            <div class="empty">Select Show voice history to load voice channel changes.</div>
+          </div>
+        </section>
+        <section class="dashboard-section">
+          <div class="section-head">
+            <h3>Bot Settings Audit</h3>
+            <button class="secondary-button" data-toggle-audit type="button" aria-expanded="false">Show audit log</button>
+          </div>
+          <div class="audit-log-list activity-list is-hidden">
+            <div class="empty">Select Show audit log to load bot settings changes.</div>
+          </div>
+        </section>
       </article>
     </template>
 

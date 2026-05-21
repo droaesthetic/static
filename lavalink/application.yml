@@ -79,7 +79,7 @@ plugins:
       - "ytsearch:%QUERY%"
     sources:
       spotify: false
-      applemusic: false
+      applemusic: true
       deezer: false
       yandexmusic: false
       flowerytts: false
@@ -109,6 +109,8 @@ plugins:
     youtube:
       countryCode: "US"
       language: "en"
+    applemusic:
+      countryCode: "US"
 
   lavalyrics:
     sources:

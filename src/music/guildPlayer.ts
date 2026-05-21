@@ -1,4 +1,5 @@
 import type { Guild, Message, VoiceBasedChannel } from "discord.js";
+import { randomUUID } from "node:crypto";
 import type { MessageCreateOptions } from "discord.js";
 import type {
   FilterOptions,
@@ -9,7 +10,7 @@ import type {
   WebSocketClosedEvent
 } from "shoukaku";
 import { appConfig } from "../config.js";
-import type { FilterPreset, QueueSnapshot, ResolvedTrack, StoredGuildPlayerState } from "../types.js";
+import type { FilterPreset, PlaybackHistoryEntry, QueueSnapshot, ResolvedTrack, StoredGuildPlayerState } from "../types.js";
 import type { LavalinkService } from "./lavalinkService.js";
 import { embedTextPayload } from "../bot/messageEmbeds.js";
 
@@ -21,12 +22,30 @@ const trebleBoostEqualizer = [-0.06, -0.05, -0.04, -0.02, 0, 0.04, 0.08, 0.12, 0
 
 /** When Lavalink/sources fail in a tight loop (e.g. repeated “parsing errors”), halt instead of starving user commands queued on the same operation chain. */
 const PLAYBACK_FAILURE_WINDOW_MS = 60_000;
-const PLAYBACK_FAILURE_THRESHOLD = 12;
+const PLAYBACK_FAILURE_THRESHOLD = 4;
+const IDLE_VOICE_DISCONNECT_MS = 3 * 60_000; 
+ 
+function isHttpUrl(value: string | undefined) {
+  return Boolean(value && /^https?:\/\//i.test(value));
+}
 
-const filterPresetOptions: Record<Exclude<FilterPreset, "off">, FilterOptions> = {
-  bassboost: {
-    equalizer: bassBoostEqualizer
-  },
+function escapeMarkdownLinkText(value: string) {
+  return value.replace(/[[\]\\]/g, "\\$&");
+}
+
+function formatLinkedTrackTitle(track: ResolvedTrack) {
+  const label = `${track.title}${track.artist ? ` by ${track.artist}` : ""}`;
+  const url = isHttpUrl(track.playbackUrl)
+    ? track.playbackUrl
+    : isHttpUrl(track.url) ? track.url : undefined;
+
+  return url ? `**[${escapeMarkdownLinkText(label)}](${url})**` : `**${label}**`;
+}
+
+const filterPresetOptions: Record<Exclude<FilterPreset, "off">, FilterOptions> = { 
+  bassboost: { 
+    equalizer: bassBoostEqualizer 
+  }, 
   nightcore: {
     timescale: { speed: 1.12, pitch: 1.125, rate: 1.05 }
   },
@@ -53,13 +72,22 @@ export class GuildPlayer {
   private current?: ResolvedTrack;
   private textChannelId?: string;
   private voiceChannelId?: string;
+  private sessionId?: string;
+  private sessionStartedAt?: string;
+  private stayInVoiceEnabled = false;
+  private stayInVoiceById?: string;
+  private soloSessionUserId?: string;
   private isAdvancing = false;
-  private isRecoveringConnection = false;
-  private ignoreNextStoppedEvent = false;
-  private isPaused = false;
-  private volume: number;
+  private isRecoveringConnection = false; 
+  private ignoreNextStoppedEvent = false; 
+  private isPaused = false;  
+  private readonly temporaryPauseReasons = new Set<string>(); 
+  private wasPausedByTemporaryHold = false; 
+  private temporaryPausePositionMs = 0;
+  private volume: number;  
   private filterPreset: FilterPreset;
   private playbackWatchdog?: ReturnType<typeof setInterval>;
+  private idleDisconnectTimer?: ReturnType<typeof setTimeout>;
   private lastPlayerUpdateAt = 0;
   private lastKnownPositionMs = 0;
   private lastWatchdogPositionMs = 0;
@@ -71,10 +99,14 @@ export class GuildPlayer {
   private playbackFailureTimestamps: number[] = [];
   private readonly canSendAnnouncements: (channelId: string) => boolean;
   private readonly onStateChange: (state: StoredGuildPlayerState | null) => Promise<void>;
+  private readonly onPlaybackAdvanced: () => void;
   private readonly onTrackFinished: (track: ResolvedTrack) => Promise<ResolvedTrack | null>;
+  private readonly onTrackRecorded: (entry: PlaybackHistoryEntry) => Promise<void>;
   private readonly resolvePlaybackTrack: (track: ResolvedTrack) => Promise<string>;
+  private readonly resolvePlaybackRetry: (track: ResolvedTrack, failedPlaybackUrls: string[]) => Promise<ResolvedTrack | null>;
   autoplayEnabled = false;
   voteSkipEnabled = false;
+  removeAfterPlayed = false;
   permissionMode: QueueSnapshot["permissionMode"] = "everyone";
 
   constructor(
@@ -83,20 +115,31 @@ export class GuildPlayer {
     options: {
       canSendAnnouncements: (channelId: string) => boolean;
       onStateChange: (state: StoredGuildPlayerState | null) => Promise<void>;
+      onPlaybackAdvanced?: () => void;
       onTrackFinished: (track: ResolvedTrack) => Promise<ResolvedTrack | null>;
+      onTrackRecorded?: (entry: PlaybackHistoryEntry) => Promise<void>;
       resolvePlaybackTrack: (track: ResolvedTrack) => Promise<string>;
+      resolvePlaybackRetry?: (track: ResolvedTrack, failedPlaybackUrls: string[]) => Promise<ResolvedTrack | null>;
       restoredState?: StoredGuildPlayerState;
     }
   ) {
     this.canSendAnnouncements = options.canSendAnnouncements;
     this.onStateChange = options.onStateChange;
+    this.onPlaybackAdvanced = options.onPlaybackAdvanced ?? (() => undefined);
     this.onTrackFinished = options.onTrackFinished;
+    this.onTrackRecorded = options.onTrackRecorded ?? (async () => undefined);
     this.resolvePlaybackTrack = options.resolvePlaybackTrack;
+    this.resolvePlaybackRetry = options.resolvePlaybackRetry ?? (async () => null);
     this.queue = [...(options.restoredState?.queue ?? [])];
     this.history = [...(options.restoredState?.history ?? [])];
     this.current = options.restoredState?.current;
     this.textChannelId = options.restoredState?.textChannelId;
     this.voiceChannelId = options.restoredState?.voiceChannelId;
+    this.sessionId = options.restoredState?.sessionId;
+    this.sessionStartedAt = options.restoredState?.sessionStartedAt;
+    this.stayInVoiceEnabled = options.restoredState?.stayInVoiceEnabled ?? false;
+    this.stayInVoiceById = options.restoredState?.stayInVoiceById;
+    this.soloSessionUserId = options.restoredState?.soloSessionUserId;
     this.volume = options.restoredState?.volume ?? appConfig.defaultVolume;
     this.filterPreset = options.restoredState?.filterPreset ?? "off";
   }
@@ -104,6 +147,10 @@ export class GuildPlayer {
   async connect(voiceChannel: VoiceBasedChannel, textChannelId: string) {
     return this.runExclusive(async () => {
       const previousVoiceChannelId = this.voiceChannelId;
+      if (!previousVoiceChannelId || !this.sessionId || !this.sessionStartedAt) {
+        this.beginSession(voiceChannel);
+      }
+
       this.voiceChannelId = voiceChannel.id;
       this.textChannelId = textChannelId;
 
@@ -111,6 +158,7 @@ export class GuildPlayer {
         await this.attachToVoiceChannel(voiceChannel);
       }
 
+      await this.rehydratePlaybackAfterConnect();
       await this.persist();
     });
   }
@@ -129,23 +177,52 @@ export class GuildPlayer {
     });
   }
 
-  async pause() {
+  async pause() { 
+    return this.runExclusive(async () => { 
+      this.wasPausedByTemporaryHold = false;
+      this.isPaused = true; 
+      await this.lavalinkPlayer?.setPaused(true); 
+      await this.persist(); 
+    }); 
+  } 
+
+  async resume() { 
+    return this.runExclusive(async () => { 
+      if (this.temporaryPauseReasons.size > 0) {
+        this.isPaused = Boolean(this.current);
+        await this.lavalinkPlayer?.setPaused(this.isPaused).catch((error) => {
+          console.warn(`[lavalink:${this.guild.id}] failed to keep playback paused during temporary hold`, error);
+        });
+        await this.persist();
+        return;
+      }
+
+      this.wasPausedByTemporaryHold = false;
+      this.isPaused = false; 
+      await this.lavalinkPlayer?.setPaused(false); 
+      await this.persist(); 
+    }); 
+  } 
+
+  async holdTemporaryPause(reason: string) {
     return this.runExclusive(async () => {
-      this.isPaused = true;
-      await this.lavalinkPlayer?.setPaused(true);
-      await this.persist();
+      await this.holdTemporaryPauseInternal(reason);
     });
   }
 
-  async resume() {
+  async releaseTemporaryPause(reason: string) {
     return this.runExclusive(async () => {
-      this.isPaused = false;
-      await this.lavalinkPlayer?.setPaused(false);
-      await this.persist();
+      await this.releaseTemporaryPauseInternal(reason);
     });
   }
 
   async stop() {
+    return this.runExclusive(async () => {
+      await this.haltPlaybackSession({ disconnectFromVoice: false });
+    });
+  }
+
+  async disconnect() {
     return this.runExclusive(async () => {
       await this.haltPlaybackSession();
     });
@@ -154,21 +231,31 @@ export class GuildPlayer {
   /**
    * Teardown playback without nesting `runExclusive` — safe to await from handlers that already run on the player's operation chain.
    */
-  private async haltPlaybackSession(options?: { logReason?: string; announceInChannel?: boolean }) {
+  private async haltPlaybackSession(options?: {
+    logReason?: string;
+    announceInChannel?: boolean;
+    disconnectFromVoice?: boolean;
+  }) {
     if (options?.logReason) {
       console.error(`[lavalink:${this.guild.id}] ${options.logReason}`);
     }
 
+    const disconnectFromVoice = options?.disconnectFromVoice ?? true;
     this.clearPlaybackFailures();
     this.queue.length = 0;
-    this.current = undefined;
-    this.isPaused = false;
-    this.ignoreNextStoppedEvent = true;
+    this.current = undefined; 
+    this.isPaused = false;  
+    this.wasPausedByTemporaryHold = false; 
+    this.temporaryPausePositionMs = 0;
+    this.temporaryPauseReasons.clear(); 
+    this.ignoreNextStoppedEvent = true; 
 
     if (this.lavalinkPlayer) {
       await this.lavalinkPlayer.stopTrack().catch(() => undefined);
-      await this.lavalink.leave(this.guild.id).catch(() => undefined);
-      this.lavalinkPlayer = undefined;
+    }
+
+    if (disconnectFromVoice) {
+      await this.leaveVoiceConnection();
     }
 
     this.stopPlaybackWatchdog();
@@ -179,12 +266,128 @@ export class GuildPlayer {
       await this.sendAutoHaltAnnouncement();
     }
 
-    this.voiceChannelId = undefined;
+    if (disconnectFromVoice) {
+      this.history.length = 0;
+      this.clearSession();
+      this.voiceChannelId = undefined;
+      this.stayInVoiceEnabled = false;
+      this.stayInVoiceById = undefined;
+      this.soloSessionUserId = undefined;
+    }
     await this.persist();
   }
 
-  private clearPlaybackFailures() {
-    this.playbackFailureTimestamps.length = 0;
+  private clearPlaybackFailures() { 
+    this.playbackFailureTimestamps.length = 0; 
+  } 
+
+  private async holdTemporaryPauseInternal(reason: string) {
+    if (this.temporaryPauseReasons.has(reason)) {
+      return;
+    }
+
+    this.temporaryPauseReasons.add(reason);
+    if (!this.current) {
+      await this.persist();
+      return;
+    }
+
+    if (!this.isPaused) { 
+      this.wasPausedByTemporaryHold = true; 
+    } 
+
+    this.temporaryPausePositionMs = Math.max(
+      this.temporaryPausePositionMs,
+      this.lastKnownPositionMs,
+      this.lavalinkPlayer?.position ?? 0
+    );
+    this.isPaused = true; 
+    await this.lavalinkPlayer?.setPaused(true).catch((error) => { 
+      console.warn(`[lavalink:${this.guild.id}] failed to apply temporary pause hold`, error); 
+    });
+    await this.persist();
+  }
+
+  private async releaseTemporaryPauseInternal(reason: string) {
+    if (!this.temporaryPauseReasons.delete(reason)) {
+      return;
+    }
+
+    if (this.temporaryPauseReasons.size > 0) {
+      await this.persist();
+      return;
+    }
+
+    if (this.wasPausedByTemporaryHold && this.current) { 
+      this.wasPausedByTemporaryHold = false; 
+      const resumeAtSeconds = Math.floor(Math.max(
+        this.temporaryPausePositionMs,
+        this.lastKnownPositionMs,
+        this.lavalinkPlayer?.position ?? 0
+      ) / 1000);
+      this.temporaryPausePositionMs = 0;
+
+      if (!this.lavalinkPlayer?.track) {
+        console.warn(
+          `[lavalink:${this.guild.id}] restarting interrupted track at ${resumeAtSeconds}s after temporary pause`
+        );
+        await this.startTrack(this.current, resumeAtSeconds, false);
+        await this.persist();
+        return;
+      }
+
+      this.isPaused = false; 
+      await this.lavalinkPlayer?.setPaused(false).catch((error) => { 
+        console.warn(`[lavalink:${this.guild.id}] failed to release temporary pause hold`, error); 
+      });
+    }
+
+    await this.persist();
+  }
+
+  private beginSession(voiceChannel: VoiceBasedChannel) {
+    this.sessionId = randomUUID();
+    this.sessionStartedAt = new Date().toISOString();
+    this.history.length = 0;
+    this.voiceChannelId = voiceChannel.id;
+  }
+
+  private clearSession() {
+    this.sessionId = undefined;
+    this.sessionStartedAt = undefined;
+  }
+
+  private async rememberFinishedTrack(track: ResolvedTrack) {
+    this.history.push(track);
+    if (this.history.length > 25) {
+      this.history.shift();
+    }
+
+    if (!this.sessionId || !this.sessionStartedAt) {
+      return;
+    }
+
+    await this.onTrackRecorded({
+      id: randomUUID(),
+      guildId: this.guild.id,
+      sessionId: this.sessionId,
+      sessionStartedAt: this.sessionStartedAt,
+      voiceChannelId: this.voiceChannelId,
+      voiceChannelName: this.getVoiceChannelName(),
+      playedAt: new Date().toISOString(),
+      track
+    }).catch((error) => {
+      console.error(`[history:${this.guild.id}] failed to record played track`, error);
+    });
+  }
+
+  private getVoiceChannelName() {
+    if (!this.voiceChannelId) {
+      return undefined;
+    }
+
+    const channel = this.guild.channels.cache.get(this.voiceChannelId);
+    return channel && "name" in channel ? channel.name : undefined;
   }
 
   /** Returns true when too many failures recently (caller should halt playback). */
@@ -197,23 +400,23 @@ export class GuildPlayer {
     return this.playbackFailureTimestamps.length >= PLAYBACK_FAILURE_THRESHOLD;
   }
 
-  async skip() {
-    return this.runExclusive(async () => {
-      await this.lavalinkPlayer?.stopTrack();
-    });
-  }
+  async skip() { 
+    return this.runExclusive(async () => { 
+      await this.skipCurrentTrack(); 
+    }); 
+  } 
 
   async skipTo(index: number) {
     return this.runExclusive(async () => {
       if (index < 1 || index > this.queue.length) {
         throw new Error("That queue position does not exist.");
-      }
+      } 
 
-      this.queue.splice(0, index - 1);
-      await this.persist();
-      await this.lavalinkPlayer?.stopTrack();
-    });
-  }
+      this.queue.splice(0, index - 1); 
+      await this.persist(); 
+      await this.skipCurrentTrack(); 
+    }); 
+  } 
 
   async playPrevious() {
     return this.runExclusive(async () => {
@@ -226,11 +429,11 @@ export class GuildPlayer {
         this.queue.unshift(this.current);
       }
 
-      this.queue.unshift(previous);
-      await this.persist();
-      await this.lavalinkPlayer?.stopTrack();
-    });
-  }
+      this.queue.unshift(previous); 
+      await this.persist(); 
+      await this.skipCurrentTrack(); 
+    }); 
+  } 
 
   async remove(index: number) {
     return this.runExclusive(async () => {
@@ -273,13 +476,17 @@ export class GuildPlayer {
     });
   }
 
-  async removeDuplicates() {
-    return this.runExclusive(async () => {
-      const seen = new Set<string>();
-      const before = this.queue.length;
-      const filtered = this.queue.filter((track) => {
-        const key = `${track.title.toLowerCase()}::${track.artist?.toLowerCase() ?? ""}`;
-        if (seen.has(key)) {
+  async removeDuplicates() { 
+    return this.runExclusive(async () => { 
+      const seen = new Set<string>(); 
+      if (this.current) { 
+        seen.add(`${this.current.title.toLowerCase()}::${this.current.artist?.toLowerCase() ?? ""}`); 
+      } 
+ 
+      const before = this.queue.length; 
+      const filtered = this.queue.filter((track) => { 
+        const key = `${track.title.toLowerCase()}::${track.artist?.toLowerCase() ?? ""}`; 
+        if (seen.has(key)) { 
           return false;
         }
         seen.add(key);
@@ -291,15 +498,25 @@ export class GuildPlayer {
     });
   }
 
-  async removeAbsentMembers(activeMemberIds: Set<string>) {
-    return this.runExclusive(async () => {
-      const before = this.queue.length;
-      const filtered = this.queue.filter((track) => activeMemberIds.has(track.requestedById));
-      this.queue.splice(0, this.queue.length, ...filtered);
-      await this.persist();
-      return before - this.queue.length;
-    });
-  }
+  async removeAbsentMembers(activeMemberIds: Set<string>) { 
+    return this.runExclusive(async () => { 
+      const before = this.queue.length; 
+      const filtered = this.queue.filter((track) => activeMemberIds.has(track.requestedById)); 
+      this.queue.splice(0, this.queue.length, ...filtered); 
+ 
+      let removed = before - filtered.length; 
+      const removeCurrent = this.current ? !activeMemberIds.has(this.current.requestedById) : false; 
+ 
+      await this.persist(); 
+ 
+      if (removeCurrent) { 
+        removed += 1; 
+        await this.skipCurrentTrack(); 
+      } 
+ 
+      return removed; 
+    }); 
+  } 
 
   async massRemove(start: number, count: number) {
     return this.runExclusive(async () => {
@@ -334,6 +551,50 @@ export class GuildPlayer {
     });
   }
 
+  async autoFix() {
+    return this.runExclusive(async () => {
+      const actions: string[] = [];
+      this.clearPlaybackFailures();
+
+      if (!this.voiceChannelId) {
+        return {
+          applied: false,
+          actions: ["No active voice session was found. Start one with /join or /play."]
+        };
+      }
+
+      if (!this.current && this.queue.length > 0) {
+        await this.maybeContinuePlaybackChain();
+        return {
+          applied: true,
+          actions: ["Restarted playback from the next queued song."]
+        };
+      }
+
+      if (this.current && (!this.lavalinkPlayer || !this.lavalinkPlayer.track)) {
+        await this.recoverCurrentPlayback("manual fix command: missing player or track");
+        return {
+          applied: true,
+          actions: ["Rebuilt the voice player and tried to resume the current song."]
+        };
+      }
+
+      const updateAgeMs = this.lastPlayerUpdateAt ? Date.now() - this.lastPlayerUpdateAt : 0;
+      if (this.current && updateAgeMs > 45_000) {
+        await this.recoverCurrentPlayback(`manual fix command: stale player updates for ${Math.round(updateAgeMs / 1000)}s`);
+        return {
+          applied: true,
+          actions: ["Refreshed the voice connection because playback updates looked stale."]
+        };
+      }
+
+      this.syncIdleDisconnectTimer();
+      actions.push("Checked the player, voice connection, queue, and playback watchdog state.");
+      actions.push("No automatic repair was needed.");
+      return { applied: false, actions };
+    });
+  }
+
   async setVolume(percent: number) {
     return this.runExclusive(async () => {
       this.volume = Math.max(1, Math.min(150, percent));
@@ -348,6 +609,47 @@ export class GuildPlayer {
       await this.applyCurrentFilterPreset();
       await this.persist();
       return this.filterPreset;
+    });
+  }
+
+  async setStayInVoice(enabled: boolean, userId?: string) {
+    return this.runExclusive(async () => {
+      if (enabled && !this.voiceChannelId) {
+        throw new Error("The bot must be in a voice channel before 24/7 voice can be enabled.");
+      }
+
+      this.stayInVoiceEnabled = enabled;
+      this.stayInVoiceById = enabled ? userId : undefined;
+      await this.persist();
+      return this.stayInVoiceEnabled;
+    });
+  }
+
+  async setSoloSession(enabled: boolean, userId: string) {
+    return this.runExclusive(async () => {
+      if (enabled && !this.voiceChannelId) {
+        throw new Error("The bot must be in a voice channel before solo session can be enabled.");
+      }
+
+      if (enabled && this.soloSessionUserId && this.soloSessionUserId !== userId) {
+        throw new Error(`<@${this.soloSessionUserId}> already has solo session enabled.`);
+      }
+
+      this.soloSessionUserId = enabled ? userId : undefined;
+      await this.persist();
+      return this.soloSessionUserId;
+    });
+  }
+
+  async clearSoloSessionForUser(userId: string) {
+    return this.runExclusive(async () => {
+      if (this.soloSessionUserId !== userId) {
+        return false;
+      }
+
+      this.soloSessionUserId = undefined;
+      await this.persist();
+      return true;
     });
   }
 
@@ -371,15 +673,22 @@ export class GuildPlayer {
       guildName: this.guild.name,
       voiceChannelId: this.voiceChannelId,
       textChannelId: this.textChannelId,
+      sessionId: this.sessionId,
+      sessionStartedAt: this.sessionStartedAt,
+      stayInVoiceEnabled: this.stayInVoiceEnabled,
+      stayInVoiceById: this.stayInVoiceById,
+      soloSessionUserId: this.soloSessionUserId,
       isPlaying: Boolean(this.current) && !this.isPaused,
       isPaused: this.isPaused,
       volume: this.volume,
       filterPreset: this.filterPreset,
       autoplay: this.autoplayEnabled,
       voteSkipEnabled: this.voteSkipEnabled,
+      removeAfterPlayed: this.removeAfterPlayed,
       permissionMode: this.permissionMode,
       current: this.current,
       previous: this.history.at(-1),
+      played: [...this.history],
       upcoming: [...this.queue]
     };
   }
@@ -390,6 +699,11 @@ export class GuildPlayer {
       guildName: this.guild.name,
       voiceChannelId: this.voiceChannelId,
       textChannelId: this.textChannelId,
+      sessionId: this.sessionId,
+      sessionStartedAt: this.sessionStartedAt,
+      stayInVoiceEnabled: this.stayInVoiceEnabled,
+      stayInVoiceById: this.stayInVoiceById,
+      soloSessionUserId: this.soloSessionUserId,
       volume: this.volume,
       filterPreset: this.filterPreset,
       current: this.current,
@@ -454,15 +768,18 @@ export class GuildPlayer {
     player.removeAllListeners("resumed");
   }
 
-  private async advancePlaybackChain() {
+  private async advancePlaybackChain(options?: { recordCurrent?: boolean; allowAutoplay?: boolean }) {
+    const recordCurrent = options?.recordCurrent ?? true;
+    const allowAutoplay = options?.allowAutoplay ?? true;
     const finished = this.current;
     if (finished) {
       await this.deleteNowPlayingMessage();
+      this.onPlaybackAdvanced();
     }
 
     /** Only pushed after a successor track successfully starts or the queue genuinely ends — avoids corrupting history if `startTrack` throws. */
-    let finishedToHistory: ResolvedTrack | undefined = finished;
-    let autoplaySeed = finished;
+    let finishedToHistory: ResolvedTrack | undefined = recordCurrent ? finished : undefined;
+    let autoplaySeed = allowAutoplay ? finished : undefined;
 
     while (true) {
       let next = this.queue.shift();
@@ -473,10 +790,7 @@ export class GuildPlayer {
 
       if (!next) {
         if (finishedToHistory) {
-          this.history.push(finishedToHistory);
-          if (this.history.length > 25) {
-            this.history.shift();
-          }
+          await this.rememberFinishedTrack(finishedToHistory);
         }
 
         this.current = undefined;
@@ -490,10 +804,7 @@ export class GuildPlayer {
       try {
         await this.startTrack(next, 0);
         if (finishedToHistory) {
-          this.history.push(finishedToHistory);
-          if (this.history.length > 25) {
-            this.history.shift();
-          }
+          await this.rememberFinishedTrack(finishedToHistory);
         }
 
         return;
@@ -520,16 +831,24 @@ export class GuildPlayer {
       }
 
       await this.deleteQueueEmptyMessage();
-      const encoded = await this.resolvePlaybackTrack(track);
-      this.current = track;
-      this.isPaused = false;
-      this.lastPlayerUpdateAt = Date.now();
+      const encoded = await this.resolvePlaybackTrack(track); 
+      this.current = track; 
+      this.isPaused = this.temporaryPauseReasons.size > 0; 
+      if (this.isPaused) {
+        this.wasPausedByTemporaryHold = true;
+      }
+      this.lastPlayerUpdateAt = Date.now(); 
       this.lastKnownPositionMs = seekSeconds * 1000;
       this.lastWatchdogPositionMs = this.lastKnownPositionMs;
       this.stagnantWatchdogTicks = 0;
-      await this.persist();
-      await this.lavalink.play(this.lavalinkPlayer, encoded, this.volume, seekSeconds * 1000);
-      this.startPlaybackWatchdog();
+      await this.persist(); 
+      await this.lavalink.play(this.lavalinkPlayer, encoded, this.volume, seekSeconds * 1000); 
+      if (this.isPaused) {
+        await this.lavalinkPlayer.setPaused(true).catch((error) => {
+          console.warn(`[lavalink:${this.guild.id}] failed to apply temporary pause after track start`, error);
+        });
+      }
+      this.startPlaybackWatchdog(); 
       if (announceNowPlaying) {
         await this.sendNowPlayingMessage(track);
       }
@@ -540,11 +859,12 @@ export class GuildPlayer {
 
   private async persist() {
     await this.onStateChange(this.serialize());
+    this.syncIdleDisconnectTimer();
   }
 
   private async attachToVoiceChannel(voiceChannel: VoiceBasedChannel) {
     if (this.lavalinkPlayer) {
-      this.detachPlayerListeners(this.lavalinkPlayer);
+      await this.leaveVoiceConnection();
     }
 
     this.lavalinkPlayer = await this.lavalink.join(
@@ -562,6 +882,34 @@ export class GuildPlayer {
     }
   }
 
+  private async rehydratePlaybackAfterConnect() {
+    if (!this.lavalinkPlayer) {
+      return;
+    }
+
+    if (this.current && !this.isPaused && !this.lavalinkPlayer.track) {
+      console.warn(
+        `[lavalink:${this.guild.id}] restored player state had a current track but no live Lavalink track; restarting playback`
+      );
+      try {
+        await this.startTrack(this.current, 0, false);
+      } catch (error) {
+        console.warn(`[lavalink:${this.guild.id}] failed to restart restored current track; clearing stale current`, error);
+        this.current = undefined;
+        this.isPaused = false;
+        this.stopPlaybackWatchdog();
+        if (this.queue.length > 0) {
+          await this.maybeContinuePlaybackChain();
+        }
+      }
+      return;
+    }
+
+    if (!this.current && this.queue.length > 0) {
+      await this.maybeContinuePlaybackChain();
+    }
+  }
+
   private async handleTrackEnd(event: TrackEndEvent) {
     console.log(
       `[lavalink:${this.guild.id}] track ended reason=${event.reason} current=${this.current?.title ?? "none"}`
@@ -572,26 +920,114 @@ export class GuildPlayer {
       return;
     }
 
-    if (this.isAdvancing || this.isRecoveringConnection) {
+    if (this.isAdvancing || this.isRecoveringConnection) { 
+      return; 
+    } 
+
+    if (this.temporaryPauseReasons.size > 0 && this.current) {
+      this.temporaryPausePositionMs = Math.max(
+        this.temporaryPausePositionMs,
+        this.lastKnownPositionMs,
+        this.lavalinkPlayer?.position ?? 0
+      );
+      this.isPaused = true;
+      console.warn(
+        `[lavalink:${this.guild.id}] preserving current track after ${event.reason} during temporary pause`
+      );
+      await this.persist();
       return;
     }
 
-    if (event.reason === "replaced") {
+    if (event.reason === "replaced") { 
+      return; 
+    } 
+
+    if (event.reason === "finished") {
+      this.clearPlaybackFailures();
+      await this.advancePlaybackChain();
       return;
     }
 
-    await this.advancePlaybackChain();
+    if (event.reason === "loadFailed") {
+      if (await this.retryCurrentTrackPlayback()) {
+        return;
+      }
+    }
+
+    if (event.reason === "loadFailed" || event.reason === "cleanup") {
+      if (this.recordPlaybackFailure()) {
+        await this.haltPlaybackSession({
+          logReason:
+            `Repeated track end failures (${event.reason}) - stopping the voice session before playback can loop through bad sources.`,
+          announceInChannel: true
+        });
+        return;
+      }
+    }
+
+    await this.advancePlaybackChain({ recordCurrent: false, allowAutoplay: false });
+  }
+
+  private async retryCurrentTrackPlayback() {
+    const track = this.current;
+    if (!track || track.playbackProvider === "upload") {
+      return false;
+    }
+
+    const failedPlaybackUrls = this.uniquePlaybackUrls([
+      ...(track.failedPlaybackUrls ?? []),
+      track.playbackUrl
+    ]);
+    track.failedPlaybackUrls = failedPlaybackUrls;
+    track.encodedTrack = undefined;
+
+    try {
+      const retryTrack = await this.resolvePlaybackRetry(track, failedPlaybackUrls);
+      if (!retryTrack) {
+        return false;
+      }
+
+      const previousUrl = track.playbackUrl;
+      track.title = retryTrack.title;
+      track.artist = retryTrack.artist;
+      track.artwork = retryTrack.artwork;
+      track.durationInSeconds = retryTrack.durationInSeconds;
+      track.playbackProvider = retryTrack.playbackProvider;
+      track.playbackUrl = retryTrack.playbackUrl;
+      track.encodedTrack = undefined;
+
+      console.warn(
+        `[lavalink:${this.guild.id}] retrying "${track.title}" with alternate playback URL after loadFailed (${previousUrl} -> ${track.playbackUrl})`
+      );
+
+      await this.deleteNowPlayingMessage();
+      await this.startTrack(track, 0);
+      return true;
+    } catch (error) {
+      console.warn(`[lavalink:${this.guild.id}] failed to retry alternate playback URL`, error);
+      return false;
+    }
+  }
+
+  private uniquePlaybackUrls(urls: string[]) {
+    return [...new Set(urls.filter(Boolean).map((url) => url.toLowerCase()))];
   }
 
   private async handleTrackStuck(event: TrackStuckEvent) {
     console.error(`[lavalink:${this.guild.id}] track stuck`, event);
 
-    if (this.isAdvancing || this.isRecoveringConnection) {
+    if (this.isAdvancing || this.isRecoveringConnection) { 
+      return; 
+    } 
+
+    if (this.temporaryPauseReasons.size > 0 && this.current) {
+      console.warn(`[lavalink:${this.guild.id}] ignoring stuck event during temporary pause`);
+      await this.persist();
       return;
     }
 
-    if (this.recordPlaybackFailure()) {
-      await this.haltPlaybackSession({
+    if (this.recordPlaybackFailure()) { 
+      await this.haltPlaybackSession({ 
         logReason:
           "Repeated stuck tracks — stopping the voice session to avoid looping through bad sources.",
         announceInChannel: true
@@ -599,17 +1035,23 @@ export class GuildPlayer {
       return;
     }
 
-    await this.advancePlaybackChain();
+    await this.advancePlaybackChain({ recordCurrent: false, allowAutoplay: false });
   }
 
   private async handleTrackException(event: TrackExceptionEvent) {
     console.error(`[lavalink:${this.guild.id}] track exception`, event);
 
-    if (this.isAdvancing || this.isRecoveringConnection) {
+    if (this.isAdvancing || this.isRecoveringConnection) { 
+      return; 
+    } 
+
+    if (this.temporaryPauseReasons.size > 0 && this.current) {
+      console.warn(`[lavalink:${this.guild.id}] ignoring track exception during temporary pause`);
+      await this.persist();
       return;
     }
 
-    if (this.recordPlaybackFailure()) {
+    if (this.recordPlaybackFailure()) { 
       await this.haltPlaybackSession({
         logReason:
           "Repeated Lavalink track exceptions (often source/parsing failures) — stopping the voice session to avoid a skip loop.",
@@ -618,18 +1060,19 @@ export class GuildPlayer {
       return;
     }
 
-    await this.advancePlaybackChain();
+    await this.advancePlaybackChain({ recordCurrent: false, allowAutoplay: false });
   }
 
-  private async handleVoiceClosed(event: WebSocketClosedEvent) {
-    console.error(`[lavalink:${this.guild.id}] websocket closed`, event);
+  private async handleVoiceClosed(event: WebSocketClosedEvent) { 
+    console.error(`[lavalink:${this.guild.id}] websocket closed`, event); 
 
-    if (this.isRecoveringConnection || !this.current || !this.voiceChannelId) {
-      return;
-    }
+    if (this.isRecoveringConnection || !this.current || !this.voiceChannelId) { 
+      return; 
+    } 
 
-    await this.recoverCurrentPlayback(`websocket close code=${event.code}`);
-  }
+    await this.holdTemporaryPauseInternal("voice-connection");
+    await this.recoverCurrentPlayback(`websocket close code=${event.code}`); 
+  } 
 
   private async recoverCurrentPlayback(reason: string) {
     if (this.isRecoveringConnection || !this.current || !this.voiceChannelId) {
@@ -649,22 +1092,25 @@ export class GuildPlayer {
         `[lavalink:${this.guild.id}] attempting playback recovery after ${reason} at ${resumeAtSeconds}s`
       );
 
-      if (this.lavalinkPlayer) {
-        this.detachPlayerListeners(this.lavalinkPlayer);
-      }
-
-      await this.lavalink.leave(this.guild.id).catch(() => undefined);
-      this.lavalinkPlayer = undefined;
+      await this.leaveVoiceConnection();
       await this.attachToVoiceChannel(channel);
 
-      if (this.current) {
-        await this.startTrack(this.current, resumeAtSeconds, false);
-        console.log(
-          `[lavalink:${this.guild.id}] recovered current track at ${resumeAtSeconds}s`
-        );
+      if (this.current) { 
+        await this.startTrack(this.current, resumeAtSeconds, false); 
+        await this.releaseTemporaryPauseInternal("voice-connection");
+        console.log( 
+          `[lavalink:${this.guild.id}] recovered current track at ${resumeAtSeconds}s` 
+        ); 
       }
     } catch (error) {
       console.error(`[lavalink:${this.guild.id}] recovery failed`, error);
+      if (this.recordPlaybackFailure()) {
+        await this.haltPlaybackSession({
+          logReason:
+            "Repeated playback recovery failures - stopping the voice session before the watchdog can loop.",
+          announceInChannel: true
+        });
+      }
     } finally {
       this.isRecoveringConnection = false;
       await this.persist();
@@ -690,6 +1136,59 @@ export class GuildPlayer {
     clearInterval(this.playbackWatchdog);
     this.playbackWatchdog = undefined;
     this.stagnantWatchdogTicks = 0;
+  }
+
+  private syncIdleDisconnectTimer() {
+    this.clearIdleDisconnectTimer();
+
+    if (!this.voiceChannelId || this.current || this.queue.length > 0 || this.stayInVoiceEnabled) {
+      return;
+    }
+
+    this.idleDisconnectTimer = setTimeout(() => {
+      void this.runExclusive(() => this.disconnectIfStillIdle()).catch((error) => {
+        console.error(`[lavalink:${this.guild.id}] idle disconnect failed`, error);
+      });
+    }, IDLE_VOICE_DISCONNECT_MS);
+    this.idleDisconnectTimer.unref?.();
+  }
+
+  private clearIdleDisconnectTimer() {
+    if (!this.idleDisconnectTimer) {
+      return;
+    }
+
+    clearTimeout(this.idleDisconnectTimer);
+    this.idleDisconnectTimer = undefined;
+  }
+
+  private async disconnectIfStillIdle() {
+    this.idleDisconnectTimer = undefined;
+
+    if (!this.voiceChannelId || this.current || this.queue.length > 0) {
+      return;
+    }
+
+    console.log(`[lavalink:${this.guild.id}] leaving voice after 3 minutes of inactivity`);
+    await this.leaveVoiceConnection();
+
+    this.voiceChannelId = undefined;
+    this.history.length = 0;
+    this.clearSession();
+    this.soloSessionUserId = undefined;
+    this.isPaused = false;
+    this.stopPlaybackWatchdog();
+    await this.deleteQueueEmptyMessage();
+    await this.persist();
+  }
+
+  private async leaveVoiceConnection() {
+    if (this.lavalinkPlayer) {
+      this.detachPlayerListeners(this.lavalinkPlayer);
+      this.lavalinkPlayer = undefined;
+    }
+
+    await this.lavalink.leave(this.guild.id).catch(() => undefined);
   }
 
   private async inspectPlaybackHealth() {
@@ -746,7 +1245,7 @@ export class GuildPlayer {
     await this.deleteNowPlayingMessage(channel);
     const message = await channel.send({
       ...embedTextPayload(
-        `**${track.title}**${track.artist ? ` by ${track.artist}` : ""}\nRequested by: ${this.formatRequester(track)}`,
+        `${formatLinkedTrackTitle(track)}\nRequested by: ${this.formatRequester(track)}`,
         { title: "Now Playing", tone: "success" }
       )
     });
@@ -877,22 +1376,32 @@ export class GuildPlayer {
 
       await this.persist();
 
-      if (removeCurrent) {
-        removed += 1;
-        if (this.lavalinkPlayer) {
-          await this.lavalinkPlayer.stopTrack();
-        } else {
-          await this.advancePlaybackChain();
-        }
-      }
+      if (removeCurrent) { 
+        removed += 1; 
+        await this.skipCurrentTrack(); 
+      } 
 
-      return removed;
-    });
+      return removed; 
+    }); 
+  } 
+
+  private async skipCurrentTrack() {
+    if (this.lavalinkPlayer?.track) {
+      this.ignoreNextStoppedEvent = true;
+      await this.lavalinkPlayer.stopTrack().catch((error) => {
+        this.ignoreNextStoppedEvent = false;
+        throw error;
+      });
+    }
+
+    if (this.current || this.queue.length > 0) {
+      await this.advancePlaybackChain({ recordCurrent: false, allowAutoplay: false });
+    }
   }
 
-  private async maybeContinuePlaybackChain() {
-    if (this.current || this.isAdvancing) {
-      return;
+  private async maybeContinuePlaybackChain() { 
+    if (this.current || this.isAdvancing) { 
+      return; 
     }
 
     await this.advancePlaybackChain();

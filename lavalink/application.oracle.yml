@@ -1,0 +1,147 @@
+# Oracle/Docker Lavalink v4 config.
+# Values in ${NAME:default} form are read from the container environment.
+
+server:
+  port: 2333
+  address: 0.0.0.0
+  http2:
+    enabled: false
+
+lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+      snapshot: false
+    - dependency: "com.github.topi314.lavasearch:lavasearch-plugin:1.0.0"
+      snapshot: false
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      snapshot: false
+    - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
+      snapshot: false
+  server:
+    password: "${LAVALINK_PASSWORD}"
+    sources:
+      youtube: false
+      bandcamp: true
+      soundcloud: true
+      twitch: false
+      vimeo: false
+      nico: false
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    nonAllocatingFrameBuffer: true
+    bufferDurationMs: 12000
+    frameBufferDurationMs: 45000
+    opusEncodingQuality: 4
+    resamplingQuality: MEDIUM
+    trackStuckThresholdMs: 45000
+    useSeekGhosting: true
+    youtubePlaylistLoadLimit: 50
+    playerUpdateInterval: 5
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    soundcloudFilterOutPreviewTracks: false
+    gc-warnings: true
+    timeouts:
+      connectTimeoutMs: 10000
+      connectionRequestTimeoutMs: 10000
+      socketTimeoutMs: 10000
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - WEB
+      - MWEB
+      - TVHTML5_SIMPLY
+      - ANDROID_VR
+    oauth:
+      enabled: ${YOUTUBE_OAUTH_ENABLED:false}
+      refreshToken: "${YOUTUBE_OAUTH_REFRESH_TOKEN:}"
+      skipInitialization: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:true}
+
+  lavasrc:
+    providers:
+      - 'ytmsearch:"%ISRC%"'
+      - "ytmsearch:%QUERY%"
+    sources:
+      spotify: ${LAVASRC_SPOTIFY_ENABLED:false}
+      applemusic: true
+      deezer: false
+      yandexmusic: false
+      flowerytts: false
+      youtube: true
+      vkmusic: false
+      tidal: false
+      qobuz: false
+      ytdlp: false
+      jiosaavn: false
+    lyrics-sources:
+      youtube: true
+      lrcLib: true
+      spotify: ${LAVASRC_SPOTIFY_ENABLED:false}
+      deezer: false
+      yandexmusic: false
+      vkmusic: false
+    spotify:
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
+      countryCode: "US"
+      playlistLoadLimit: 6
+      albumLoadLimit: 6
+      resolveArtistsInSearch: true
+      localFiles: false
+      preferAnonymousToken: false
+    youtube:
+      countryCode: "US"
+      language: "en"
+    applemusic:
+      countryCode: "US"
+
+  lavalyrics:
+    sources:
+      - lrcLib
+      - youtube
+      - spotify
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+sentry:
+  dsn: ""
+  environment: ""
+
+logging:
+  file:
+    path: ./logs/
+  level:
+    root: INFO
+    lavalink: INFO
+  request:
+    enabled: false
+    includeClientInfo: true
+    includeHeaders: false
+    includeQueryString: false
+    includePayload: false
+    maxPayloadLength: 1000
+    beforeRequest: false
+  logback:
+    rollingpolicy:
+      max-file-size: 1GB
+      max-history: 30

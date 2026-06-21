@@ -1,0 +1,61 @@
+services:
+  bot:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      NODE_ENV: production
+      DASHBOARD_PORT: "3000"
+      LAVALINK_URL: lavalink:2333
+      LAVALINK_SECURE: "false"
+    depends_on:
+      - lavalink
+    volumes:
+      - ../../data:/app/data
+    networks:
+      - botnet
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    restart: unless-stopped
+    environment:
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD}
+      YOUTUBE_OAUTH_ENABLED: ${YOUTUBE_OAUTH_ENABLED:-false}
+      YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
+      YOUTUBE_OAUTH_SKIP_INITIALIZATION: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:-true}
+      LAVASRC_SPOTIFY_ENABLED: ${LAVASRC_SPOTIFY_ENABLED:-false}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+    volumes:
+      - ../../lavalink/application.oracle.yml:/opt/Lavalink/application.yml:ro
+      - ../../lavalink/logs:/opt/Lavalink/logs
+      - ../../lavalink/plugins:/opt/Lavalink/plugins
+    networks:
+      - botnet
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+    networks:
+      - botnet
+
+networks:
+  botnet:
+
+volumes:
+  caddy_data:
+  caddy_config:

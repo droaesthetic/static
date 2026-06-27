@@ -252,6 +252,28 @@ Point your `.xyz` domain to the machine or host running this app, then set:
 
 The dashboard uses a bearer token for control. Put it behind Cloudflare Access, Tailscale Funnel, Caddy basic auth, or another gate if you want an extra security layer.
 
+## Render Hosting
+
+Render can run this app as a Node web service because the server already honors Render's `PORT` environment variable.
+
+Use this when you want the dashboard and bot process on a normal Render service:
+
+1. Push this repo to GitHub.
+2. In Render, create a new Web Service from the repo or import the `render.yaml` blueprint in the repo root.
+3. Set the required env vars in Render's dashboard, especially:
+   - `DISCORD_TOKEN`
+   - `DISCORD_CLIENT_ID`
+   - `DASHBOARD_AUTH_TOKEN`
+   - `DASHBOARD_PUBLIC_URL`
+   - `LAVALINK_URL`
+   - `LAVALINK_PASSWORD`
+4. Point `DASHBOARD_PUBLIC_URL` at the Render service URL, for example `https://your-service.onrender.com`.
+5. Make sure `LAVALINK_URL` points to a separate Lavalink server you control.
+
+Render's free web service tier is only `512 MB` RAM and `0.1 CPU`, so it is too small for the full bot plus Lavalink stack as an always-on setup. It can still be useful for the dashboard or for testing, but for a real 24/7 bot you will usually want a paid Render service or another host for Lavalink.
+
+The `render.yaml` file in this repo is the blueprint for that setup.
+
 ## Oracle Cloud Always Free Hosting
 
 Use this when you want the bot, dashboard, and Lavalink to stay online while your computer is off.
@@ -431,25 +453,6 @@ Start Lavalink once, complete the device-code flow in the Lavalink terminal, the
 YOUTUBE_OAUTH_REFRESH_TOKEN=your-refresh-token
 YOUTUBE_OAUTH_SKIP_INITIALIZATION=true
 ```
-
-## Old Render Notes
-
-For Render:
-
-1. Connect the GitHub repo.
-2. Deploy the `render.yaml` blueprint or use a Node web service.
-3. Set secrets:
-   - `DISCORD_TOKEN`
-   - `DISCORD_CLIENT_ID`
-   - `DASHBOARD_AUTH_TOKEN`
-   - `DASHBOARD_PUBLIC_URL`
-4. After the first deploy, add your custom domain in Render:
-   - `Settings -> Custom Domains -> Add Custom Domain`
-   - enter `static.xyz` or `dashboard.static.xyz`
-5. Copy the DNS target Render gives you and add it at your registrar.
-6. Update `DASHBOARD_PUBLIC_URL` to the final `https://...` domain and redeploy.
-
-Render will provision TLS automatically after DNS is correct.
 
 ## Notes on audio quality
 

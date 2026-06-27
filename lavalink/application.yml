@@ -21,7 +21,7 @@ lavalink:
     - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
       snapshot: false
   server:
-    password: "droTunesLocalLava2026!"
+    password: "${LAVALINK_PASSWORD:droTunesLocalLava2026!}"
     sources:
       youtube: false
       bandcamp: true
@@ -74,11 +74,11 @@ plugins:
       - TVHTML5_SIMPLY
       - ANDROID_VR
     oauth:
-      enabled: false
+      enabled: ${YOUTUBE_OAUTH_ENABLED:false}
       # Set by lavalink/start-lavalink.ps1 from YOUTUBE_OAUTH_REFRESH_TOKEN.
-      refreshToken: ""
+      refreshToken: "${YOUTUBE_OAUTH_REFRESH_TOKEN:}"
       # Keep startup non-interactive unless YOUTUBE_OAUTH_SKIP_INITIALIZATION=false.
-      skipInitialization: true
+      skipInitialization: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:true}
 
   lavasrc:
     providers:
@@ -105,8 +105,8 @@ plugins:
       yandexmusic: false
       vkmusic: false
     spotify:
-      clientId: ""
-      clientSecret: ""
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
       countryCode: "US"
       playlistLoadLimit: 6
       albumLoadLimit: 6

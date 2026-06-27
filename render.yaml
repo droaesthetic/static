@@ -1,10 +1,11 @@
 services:
   - type: web
     name: static
-    runtime: node
+    runtime: docker
     plan: free
-    buildCommand: npm install --ignore-scripts && npm run build
-    startCommand: npm start
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     autoDeploy: true
     envVars:
       - key: DISCORD_TOKEN

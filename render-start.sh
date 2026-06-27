@@ -47,6 +47,8 @@ for attempt in $(seq 1 90); do
   sleep 1
 done
 
+sleep 3
+
 echo "Starting bot..."
 exec node dist/index.js
 

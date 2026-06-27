@@ -1,21 +1,35 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AppState, DashboardAuditLogEntry, GuildSettings, PlaybackHistoryEntry, Playlist, PremiumUserSettings, StoredGuildPlayerState, VoiceChannelHistoryEntry } from "../types.js";
+import type {
+  AppState,
+  DashboardAuditLogEntry,
+  GuildSettings,
+  PlaybackHistoryEntry,
+  Playlist,
+  PremiumUserSettings,
+  ResolvedTrack,
+  StoredGuildPlayerState,
+  UserMusicPreferenceEvent,
+  UserMusicPreferences,
+  VoiceChannelHistoryEntry
+} from "../types.js";
 
 const dataDir = path.resolve(process.cwd(), "data");
 const statePath = path.join(dataDir, "state.json");
 const playbackHistoryRetentionMs = 14 * 24 * 60 * 60 * 1000;
 
-const defaultState: AppState = { 
-  guildSettings: {}, 
-  guildPlayers: {}, 
-  playlists: {}, 
-  voiceChannelHistory: {}, 
-  settingsAuditLogs: {}, 
-  songHistory: {}, 
+const defaultState: AppState = {
+  guildSettings: {},
+  guildPlayers: {},
+  playlists: {},
+  voiceChannelHistory: {},
+  settingsAuditLogs: {},
+  songHistory: {},
   globalDeniedUserIds: [],
-  premiumUsers: {}
-}; 
+  commandAliases: {},
+  premiumUsers: {},
+  userMusicPreferences: {}
+};
 
 export class StateStore {
   private state: AppState = structuredClone(defaultState);
@@ -32,16 +46,18 @@ export class StateStore {
     try {
       const raw = await readFile(statePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<AppState>;
-      this.state = { 
-        ...defaultState, 
-        ...parsed,  
-        playlists: this.normalizePlaylists(parsed.playlists),  
-        voiceChannelHistory: parsed.voiceChannelHistory ?? {},  
-        settingsAuditLogs: parsed.settingsAuditLogs ?? {},  
-        songHistory: parsed.songHistory ?? {},  
+      this.state = {
+        ...defaultState,
+        ...parsed,
+        playlists: this.normalizePlaylists(parsed.playlists),
+        voiceChannelHistory: parsed.voiceChannelHistory ?? {},
+        settingsAuditLogs: parsed.settingsAuditLogs ?? {},
+        songHistory: parsed.songHistory ?? {},
         globalDeniedUserIds: Array.isArray(parsed.globalDeniedUserIds) ? [...new Set(parsed.globalDeniedUserIds)] : [],
-        premiumUsers: this.normalizePremiumUsers(parsed.premiumUsers)
-      };  
+        commandAliases: this.normalizeCommandAliases(parsed.commandAliases),
+        premiumUsers: this.normalizePremiumUsers(parsed.premiumUsers),
+        userMusicPreferences: this.normalizeUserMusicPreferences(parsed.userMusicPreferences)
+      };
       this.pruneSongHistory();
     } catch {
       await this.flush();
@@ -54,19 +70,33 @@ export class StateStore {
     return this.state.guildSettings[guildId];
   }
 
-  async setGuildSettings(settings: GuildSettings) { 
-    this.state.guildSettings[settings.guildId] = settings; 
-    await this.flush(); 
-  } 
- 
-  getGlobalDeniedUserIds() { 
-    return [...this.state.globalDeniedUserIds]; 
-  } 
- 
-  async setGlobalDeniedUserIds(userIds: string[]) { 
-    this.state.globalDeniedUserIds = [...new Set(userIds)].sort((left, right) => left.localeCompare(right)); 
-    await this.flush(); 
-  } 
+  async setGuildSettings(settings: GuildSettings) {
+    this.state.guildSettings[settings.guildId] = settings;
+    await this.flush();
+  }
+
+  getGlobalDeniedUserIds() {
+    return [...this.state.globalDeniedUserIds];
+  }
+
+  async setGlobalDeniedUserIds(userIds: string[]) {
+    this.state.globalDeniedUserIds = [...new Set(userIds)].sort((left, right) => left.localeCompare(right));
+    await this.flush();
+  }
+
+  getCommandAliases() {
+    return { ...this.state.commandAliases };
+  }
+
+  async setCommandAlias(alias: string, commandName: string) {
+    this.state.commandAliases[alias] = commandName;
+    await this.flush();
+  }
+
+  async deleteCommandAlias(alias: string) {
+    delete this.state.commandAliases[alias];
+    await this.flush();
+  }
 
   getPremiumUser(userId: string): PremiumUserSettings | undefined {
     const settings = this.state.premiumUsers[userId];
@@ -83,9 +113,19 @@ export class StateStore {
     this.state.premiumUsers[settings.userId] = { ...settings };
     await this.flush();
   }
- 
-  getGuildPlayer(guildId: string): StoredGuildPlayerState | undefined { 
+
+  getGuildPlayer(guildId: string): StoredGuildPlayerState | undefined {
     return this.state.guildPlayers[guildId];
+  }
+
+  getGuildPlayers(): StoredGuildPlayerState[] {
+    return Object.values(this.state.guildPlayers)
+      .map((player) => ({
+        ...player,
+        queue: [...player.queue],
+        history: [...player.history]
+      }))
+      .sort((left, right) => left.guildName.localeCompare(right.guildName) || left.guildId.localeCompare(right.guildId));
   }
 
   async setGuildPlayer(player: StoredGuildPlayerState) {
@@ -96,6 +136,13 @@ export class StateStore {
   async deleteGuildPlayer(guildId: string) {
     delete this.state.guildPlayers[guildId];
     await this.flush();
+  }
+
+  async clearGuildPlayers() {
+    const count = Object.keys(this.state.guildPlayers).length;
+    this.state.guildPlayers = {};
+    await this.flush();
+    return count;
   }
 
   getVoiceChannelHistory(guildId: string): VoiceChannelHistoryEntry[] {
@@ -141,39 +188,76 @@ export class StateStore {
     await this.flush();
   }
 
-  getPlaylists(ownerId: string): Playlist[] { 
-    return Object.values(this.state.playlists[ownerId] ?? {}).sort((a, b) => 
-      a.name.localeCompare(b.name) 
-    ); 
-  } 
+  getUserMusicPreference(userId: string): UserMusicPreferences | undefined {
+    const preferences = this.state.userMusicPreferences[userId];
+    return preferences ? this.cloneUserMusicPreferences(preferences) : undefined;
+  }
 
-  getAllPlaylists(): Playlist[] { 
-    return Object.values(this.state.playlists) 
-      .flatMap((playlistsByName) => Object.values(playlistsByName)) 
-      .sort((a, b) => a.createdById.localeCompare(b.createdById) || a.name.localeCompare(b.name)); 
-  } 
+  getUserMusicPreferences() {
+    return Object.values(this.state.userMusicPreferences)
+      .map((preferences) => this.cloneUserMusicPreferences(preferences))
+      .sort((left, right) => left.userId.localeCompare(right.userId));
+  }
 
-  getPlaylist(ownerId: string, name: string): Playlist | undefined { 
-    return this.state.playlists[ownerId]?.[name.toLowerCase()]; 
-  } 
+  async recordUserMusicPreference(userId: string, track: ResolvedTrack, event: UserMusicPreferenceEvent) {
+    if (!userId || userId === "autoplay") {
+      return;
+    }
 
-  async setPlaylist(playlist: Playlist) { 
-    this.state.playlists[playlist.createdById] ??= {}; 
-    this.state.playlists[playlist.createdById][playlist.name.toLowerCase()] = playlist; 
-    await this.flush(); 
-  } 
+    const preferences = this.state.userMusicPreferences[userId] ?? this.createEmptyUserMusicPreferences(userId);
+    const increment = (counts: Record<string, number>, rawKey: string | undefined) => {
+      const key = rawKey?.trim().toLowerCase();
+      if (key) {
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+    };
 
-  async deletePlaylist(ownerId: string, name: string) { 
-    delete this.state.playlists[ownerId]?.[name.toLowerCase()]; 
-    await this.flush(); 
-  } 
+    if (event === "queued") preferences.queuedCount += 1;
+    if (event === "played") preferences.playedCount += 1;
+    if (event === "skipped") preferences.skippedCount += 1;
+    if (event === "saved") preferences.savedCount += 1;
 
-  private normalizePlaylists(playlists: unknown): AppState["playlists"] { 
-    if (typeof playlists !== "object" || playlists === null) { 
-      return {}; 
-    } 
+    increment(preferences.artistCounts, track.artist);
+    increment(preferences.providerCounts, track.sourceProvider);
+    increment(preferences.trackCounts, this.trackPreferenceKey(track));
+    preferences.updatedAt = new Date().toISOString();
+    this.state.userMusicPreferences[userId] = preferences;
+    await this.flush();
+  }
 
-    const normalized: AppState["playlists"] = {}; 
+  getPlaylists(ownerId: string): Playlist[] {
+    return Object.values(this.state.playlists[ownerId] ?? {}).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }
+
+  getAllPlaylists(): Playlist[] {
+    return Object.values(this.state.playlists)
+      .flatMap((playlistsByName) => Object.values(playlistsByName))
+      .sort((a, b) => a.createdById.localeCompare(b.createdById) || a.name.localeCompare(b.name));
+  }
+
+  getPlaylist(ownerId: string, name: string): Playlist | undefined {
+    return this.state.playlists[ownerId]?.[name.toLowerCase()];
+  }
+
+  async setPlaylist(playlist: Playlist) {
+    this.state.playlists[playlist.createdById] ??= {};
+    this.state.playlists[playlist.createdById][playlist.name.toLowerCase()] = playlist;
+    await this.flush();
+  }
+
+  async deletePlaylist(ownerId: string, name: string) {
+    delete this.state.playlists[ownerId]?.[name.toLowerCase()];
+    await this.flush();
+  }
+
+  private normalizePlaylists(playlists: unknown): AppState["playlists"] {
+    if (typeof playlists !== "object" || playlists === null) {
+      return {};
+    }
+
+    const normalized: AppState["playlists"] = {};
     const addPlaylist = (playlist: Playlist, pathKey?: string) => {
       const ownerId = playlist.createdById;
       normalized[ownerId] ??= {};
@@ -209,10 +293,10 @@ export class StateStore {
       }
     };
 
-    visit(playlists, []); 
+    visit(playlists, []);
 
-    return normalized; 
-  } 
+    return normalized;
+  }
 
   private normalizePremiumUsers(value: unknown): AppState["premiumUsers"] {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -243,18 +327,115 @@ export class StateStore {
     return users;
   }
 
-  private isPlaylist(value: unknown): value is Playlist { 
-    if (typeof value !== "object" || value === null) { 
-      return false; 
-    } 
+  private normalizeUserMusicPreferences(value: unknown): AppState["userMusicPreferences"] {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return {};
+    }
 
-    const candidate = value as Partial<Playlist>; 
-    return typeof candidate.name === "string" 
-      && typeof candidate.createdById === "string" 
-      && Array.isArray(candidate.tracks); 
-  } 
+    const preferences: AppState["userMusicPreferences"] = {};
+    for (const [userId, rawSettings] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof rawSettings !== "object" || rawSettings === null || Array.isArray(rawSettings)) {
+        continue;
+      }
 
-  private pruneSongHistory() { 
+      const settings = rawSettings as Partial<UserMusicPreferences>;
+      preferences[userId] = {
+        userId,
+        queuedCount: this.normalizeCount(settings.queuedCount),
+        playedCount: this.normalizeCount(settings.playedCount),
+        skippedCount: this.normalizeCount(settings.skippedCount),
+        savedCount: this.normalizeCount(settings.savedCount),
+        artistCounts: this.normalizeCountRecord(settings.artistCounts),
+        trackCounts: this.normalizeCountRecord(settings.trackCounts),
+        providerCounts: this.normalizeCountRecord(settings.providerCounts),
+        updatedAt: typeof settings.updatedAt === "string" ? settings.updatedAt : new Date().toISOString()
+      };
+    }
+
+    return preferences;
+  }
+
+  private createEmptyUserMusicPreferences(userId: string): UserMusicPreferences {
+    return {
+      userId,
+      queuedCount: 0,
+      playedCount: 0,
+      skippedCount: 0,
+      savedCount: 0,
+      artistCounts: {},
+      trackCounts: {},
+      providerCounts: {},
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private cloneUserMusicPreferences(preferences: UserMusicPreferences): UserMusicPreferences {
+    return {
+      ...preferences,
+      artistCounts: { ...preferences.artistCounts },
+      trackCounts: { ...preferences.trackCounts },
+      providerCounts: { ...preferences.providerCounts }
+    };
+  }
+
+  private normalizeCount(value: unknown) {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+
+  private normalizeCountRecord(value: unknown): Record<string, number> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return {};
+    }
+
+    const counts: Record<string, number> = {};
+    for (const [rawKey, rawCount] of Object.entries(value)) {
+      const key = rawKey.trim().toLowerCase();
+      const count = this.normalizeCount(rawCount);
+      if (key && count > 0) {
+        counts[key] = count;
+      }
+    }
+
+    return counts;
+  }
+
+  private trackPreferenceKey(track: Pick<ResolvedTrack, "title" | "artist">) {
+    return [track.artist, track.title].filter(Boolean).join(" - ").trim() || track.title.trim();
+  }
+
+  private isPlaylist(value: unknown): value is Playlist {
+    if (typeof value !== "object" || value === null) {
+      return false;
+    }
+
+    const candidate = value as Partial<Playlist>;
+    return typeof candidate.name === "string"
+      && typeof candidate.createdById === "string"
+      && Array.isArray(candidate.tracks);
+  }
+
+  private normalizeCommandAliases(value: unknown): Record<string, string> {
+    if (typeof value !== "object" || value === null) {
+      return {};
+    }
+
+    const aliases: Record<string, string> = {};
+    for (const [alias, commandName] of Object.entries(value)) {
+      if (typeof commandName !== "string") {
+        continue;
+      }
+
+      const normalizedAlias = alias.trim().toLowerCase().replace(/\s+/g, " ");
+      const normalizedCommand = commandName.trim().toLowerCase().replace(/^\//, "");
+      if (normalizedAlias && normalizedCommand) {
+        aliases[normalizedAlias] = normalizedCommand;
+      }
+    }
+
+    return aliases;
+  }
+
+  private pruneSongHistory() {
     const cutoff = Date.now() - playbackHistoryRetentionMs;
     for (const [guildId, history] of Object.entries(this.state.songHistory)) {
       const pruned = history.filter((entry) => Date.parse(entry.playedAt) >= cutoff);

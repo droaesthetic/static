@@ -34,49 +34,57 @@
 
     <template id="playerTemplate">
       <article class="player-card">
-        <div class="card-top">
+        <button class="server-row" type="button" aria-expanded="false">
           <div>
             <p class="guild-name"></p>
             <p class="status-line"></p>
           </div>
           <span class="pill volume-pill"></span>
+        </button>
+        <div class="player-details" hidden>
+          <div class="server-meta"></div>
+          <div class="now-playing"></div>
+          <div class="controls">
+            <button data-action="pause">Pause</button>
+            <button data-action="resume">Resume</button>
+            <button data-action="skip">Skip</button>
+            <button data-action="stop">Stop</button>
+          </div>
+          <label class="volume-control">
+            <span>Volume</span>
+            <input data-volume type="range" min="1" max="150" />
+          </label>
+          <section class="dashboard-section">
+            <div class="section-head">
+              <h3>Queue</h3>
+            </div>
+            <div class="queue"></div>
+          </section>
+          <section class="dashboard-section">
+            <div class="section-head">
+              <h3>Bot Intelligence</h3>
+            </div>
+            <div class="intelligence-grid"></div>
+          </section>
+          <section class="dashboard-section">
+            <div class="section-head">
+              <h3>Voice Channel History</h3>
+              <button class="secondary-button" data-toggle-voice-history type="button" aria-expanded="false">Show voice history</button>
+            </div>
+            <div class="voice-history activity-list is-hidden">
+              <div class="empty">Select Show voice history to load voice channel changes.</div>
+            </div>
+          </section>
+          <section class="dashboard-section">
+            <div class="section-head">
+              <h3>Bot Settings Audit</h3>
+              <button class="secondary-button" data-toggle-audit type="button" aria-expanded="false">Show audit log</button>
+            </div>
+            <div class="audit-log-list activity-list is-hidden">
+              <div class="empty">Select Show audit log to load bot settings changes.</div>
+            </div>
+          </section>
         </div>
-        <div class="server-meta"></div>
-        <div class="now-playing"></div>
-        <div class="controls">
-          <button data-action="pause">Pause</button>
-          <button data-action="resume">Resume</button>
-          <button data-action="skip">Skip</button>
-          <button data-action="stop">Stop</button>
-        </div>
-        <label class="volume-control">
-          <span>Volume</span>
-          <input data-volume type="range" min="1" max="150" />
-        </label>
-        <section class="dashboard-section">
-          <div class="section-head">
-            <h3>Queue</h3>
-          </div>
-          <div class="queue"></div>
-        </section>
-        <section class="dashboard-section">
-          <div class="section-head">
-            <h3>Voice Channel History</h3>
-            <button class="secondary-button" data-toggle-voice-history type="button" aria-expanded="false">Show voice history</button>
-          </div>
-          <div class="voice-history activity-list is-hidden">
-            <div class="empty">Select Show voice history to load voice channel changes.</div>
-          </div>
-        </section>
-        <section class="dashboard-section">
-          <div class="section-head">
-            <h3>Bot Settings Audit</h3>
-            <button class="secondary-button" data-toggle-audit type="button" aria-expanded="false">Show audit log</button>
-          </div>
-          <div class="audit-log-list activity-list is-hidden">
-            <div class="empty">Select Show audit log to load bot settings changes.</div>
-          </div>
-        </section>
       </article>
     </template>
 

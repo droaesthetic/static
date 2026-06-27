@@ -19,17 +19,16 @@ export class LavalinkService {
     }
 
     const nodes: NodeOption[] = [{
-      ...appConfig.lavalink,
-      secure: false
+      ...appConfig.lavalink
     }];
     this.manager = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
       resume: true,
-      resumeTimeout: 60,
+      resumeTimeout: appConfig.lavalinkConnection.resumeTimeoutSeconds,
       resumeByLibrary: true,
-      reconnectTries: 10,
-      reconnectInterval: 5,
-      restTimeout: 15,
-      voiceConnectionTimeout: 30
+      reconnectTries: appConfig.lavalinkConnection.reconnectTries,
+      reconnectInterval: appConfig.lavalinkConnection.reconnectIntervalSeconds,
+      restTimeout: appConfig.lavalinkConnection.restTimeoutSeconds,
+      voiceConnectionTimeout: appConfig.lavalinkConnection.voiceConnectionTimeoutSeconds
     });
 
     this.manager.on("ready", (name, lavalinkResume, libraryResume) => {
@@ -49,6 +48,10 @@ export class LavalinkService {
 
   async join(guildId: string, channelId: string, shardId: number) {
     this.assertEnabled();
+    if (this.manager.connections.has(guildId) || this.manager.players.has(guildId)) {
+      await this.leave(guildId);
+    }
+
     return this.manager.joinVoiceChannel({
       guildId,
       channelId,

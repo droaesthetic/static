@@ -385,8 +385,10 @@ This keeps playback responsive while reducing idle voice time, dashboard polling
 For smoother playback on a local PC, the bundled Lavalink config keeps a larger audio buffer:
 
 ```yml
-bufferDurationMs: 8000
-frameBufferDurationMs: 30000
+bufferDurationMs: 1000
+frameBufferDurationMs: 5000
+playerUpdateInterval: 1
+useSeekGhosting: false
 trackStuckThresholdMs: 30000
 ```
 

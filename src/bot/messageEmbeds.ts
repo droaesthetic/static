@@ -24,8 +24,7 @@ export function buildBotEmbed(
 
   return new EmbedBuilder() 
     .setColor(toneColors[options.tone ?? "info"]) 
-    .setDescription(styledDescription) 
-    .setTimestamp(); 
+    .setDescription(styledDescription); 
 } 
 
 export function embedTextPayload(

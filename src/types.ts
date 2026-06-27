@@ -106,6 +106,43 @@ export interface DashboardAuditLogEntry {
   createdAt: string;
 }
 
+export type UserMusicPreferenceEvent = "queued" | "played" | "skipped" | "saved";
+
+export interface UserMusicPreferences {
+  userId: string;
+  queuedCount: number;
+  playedCount: number;
+  skippedCount: number;
+  savedCount: number;
+  artistCounts: Record<string, number>;
+  trackCounts: Record<string, number>;
+  providerCounts: Record<string, number>;
+  updatedAt: string;
+}
+
+export interface QueueCleanupSuggestion {
+  id: "duplicates" | "absent" | "staleRequester" | "deadCurrent" | "emptyButConnected";
+  title: string;
+  detail: string;
+  severity: "info" | "warning";
+  count?: number;
+}
+
+export interface MusicInsight {
+  title: string;
+  detail: string;
+}
+
+export interface GuildIntelligenceSnapshot {
+  guildId: string;
+  cleanupSuggestions: QueueCleanupSuggestion[];
+  insights: MusicInsight[];
+  topArtists: Array<{ name: string; count: number }>;
+  topRequesters: Array<{ userId: string; name: string; count: number }>;
+  mostPlayed: Array<{ title: string; artist?: string; count: number }>;
+  mostSkipped: Array<{ title: string; artist?: string; count: number }>;
+}
+
 export interface StoredGuildPlayerState {
   guildId: string;
   guildName: string;
@@ -170,5 +207,7 @@ export interface AppState {
   settingsAuditLogs: Record<string, DashboardAuditLogEntry[]>;  
   songHistory: Record<string, PlaybackHistoryEntry[]>;  
   globalDeniedUserIds: string[];  
+  commandAliases: Record<string, string>;
   premiumUsers: Record<string, PremiumUserSettings>;  
+  userMusicPreferences: Record<string, UserMusicPreferences>;
 }

@@ -16,7 +16,7 @@ lavalink:
       snapshot: false
     - dependency: "com.github.topi314.lavasearch:lavasearch-plugin:1.0.0"
       snapshot: false
-    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
       snapshot: false
     - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
       snapshot: false
@@ -26,9 +26,9 @@ lavalink:
       youtube: false
       bandcamp: true
       soundcloud: true
-      twitch: true
-      vimeo: true
-      nico: true
+      twitch: false
+      vimeo: false
+      nico: false
       http: true
       local: false
     filters:
@@ -42,23 +42,23 @@ lavalink:
       rotation: true
       channelMix: true
       lowPass: true
-    nonAllocatingFrameBuffer: false
-    bufferDurationMs: 400
+    nonAllocatingFrameBuffer: true
+    bufferDurationMs: 1000
     frameBufferDurationMs: 5000
-    opusEncodingQuality: 10
-    resamplingQuality: HIGH
-    trackStuckThresholdMs: 10000
-    useSeekGhosting: true
-    youtubePlaylistLoadLimit: 100
-    playerUpdateInterval: 5
+    opusEncodingQuality: 4
+    resamplingQuality: MEDIUM
+    trackStuckThresholdMs: 45000
+    useSeekGhosting: false
+    youtubePlaylistLoadLimit: 50
+    playerUpdateInterval: 1
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
     soundcloudFilterOutPreviewTracks: false
     gc-warnings: true
     timeouts:
-      connectTimeoutMs: 3000
-      connectionRequestTimeoutMs: 3000
-      socketTimeoutMs: 3000
+      connectTimeoutMs: 10000
+      connectionRequestTimeoutMs: 10000
+      socketTimeoutMs: 10000
 
 # Root "plugins" is plugin-specific settings (not the same as lavalink.plugins dependencies).
 plugins:
@@ -69,14 +69,21 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - MUSIC
-      - ANDROID_VR
       - WEB
-      - WEBEMBEDDED
+      - MWEB
+      - TVHTML5_SIMPLY
+      - ANDROID_VR
+    oauth:
+      enabled: false
+      # Set by lavalink/start-lavalink.ps1 from YOUTUBE_OAUTH_REFRESH_TOKEN.
+      refreshToken: ""
+      # Keep startup non-interactive unless YOUTUBE_OAUTH_SKIP_INITIALIZATION=false.
+      skipInitialization: true
 
   lavasrc:
     providers:
-      - 'ytsearch:"%ISRC%"'
-      - "ytsearch:%QUERY%"
+      - 'ytmsearch:"%ISRC%"'
+      - "ytmsearch:%QUERY%"
     sources:
       spotify: false
       applemusic: true
@@ -134,12 +141,12 @@ logging:
     root: INFO
     lavalink: INFO
   request:
-    enabled: true
+    enabled: false
     includeClientInfo: true
     includeHeaders: false
-    includeQueryString: true
-    includePayload: true
-    maxPayloadLength: 10000
+    includeQueryString: false
+    includePayload: false
+    maxPayloadLength: 1000
     beforeRequest: false
   logback:
     rollingpolicy:

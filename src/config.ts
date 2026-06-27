@@ -3,6 +3,23 @@ import { z } from "zod";
 
 loadEnv();
 
+const booleanFromEnv = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off", ""].includes(normalized)) {
+    return false;
+  }
+
+  return value;
+}, z.boolean());
+
 const schema = z.object({
   DISCORD_TOKEN: z.string().min(1),
   DISCORD_CLIENT_ID: z.string().min(1),
@@ -10,7 +27,12 @@ const schema = z.object({
   LAVALINK_NAME: z.string().default("main"),
   LAVALINK_URL: z.string().default(""),
   LAVALINK_PASSWORD: z.string().default(""),
-  LAVALINK_SECURE: z.coerce.boolean().default(false),
+  LAVALINK_SECURE: booleanFromEnv.default(false),
+  LAVALINK_RESUME_TIMEOUT_SECONDS: z.coerce.number().min(10).max(600).default(120),
+  LAVALINK_RECONNECT_TRIES: z.coerce.number().min(0).max(100).default(20),
+  LAVALINK_RECONNECT_INTERVAL_SECONDS: z.coerce.number().min(1).max(60).default(5),
+  LAVALINK_REST_TIMEOUT_SECONDS: z.coerce.number().min(5).max(120).default(30),
+  LAVALINK_VOICE_CONNECTION_TIMEOUT_SECONDS: z.coerce.number().min(10).max(120).default(45),
   YOUTUBE_API_KEY: z.string().default(""),
   SPOTIFY_CLIENT_ID: z.string().default(""),
   SPOTIFY_CLIENT_SECRET: z.string().default(""),
@@ -26,7 +48,13 @@ const schema = z.object({
   BOT_MANAGERS: z.string().default(""),
   DEFAULT_VOLUME: z.coerce.number().min(1).max(150).default(75),
   MAX_QUEUE_SIZE: z.coerce.number().min(1).max(500).default(100),
-  CHAT_COMMAND_DELETE_AFTER_SECONDS: z.coerce.number().min(0).max(3600).default(30)
+  CHAT_COMMAND_DELETE_AFTER_SECONDS: z.coerce.number().min(0).max(3600).default(30),
+  LOW_BANDWIDTH_MODE: booleanFromEnv.default(true),
+  IDLE_VOICE_DISCONNECT_SECONDS: z.coerce.number().min(10).max(3600).optional(),
+  PLAYBACK_WATCHDOG_INTERVAL_SECONDS: z.coerce.number().min(5).max(120).optional(),
+  STALE_PLAYER_UPDATE_SECONDS: z.coerce.number().min(15).max(300).optional(),
+  NOW_PLAYING_THUMBNAILS: booleanFromEnv.optional(),
+  PRE_RESOLVE_NEXT_TRACK: booleanFromEnv.default(true)
 });
 
 const parsed = schema.parse(process.env);
@@ -41,6 +69,13 @@ export const appConfig = {
     auth: parsed.LAVALINK_PASSWORD,
     secure: parsed.LAVALINK_SECURE
   } : null,
+  lavalinkConnection: {
+    resumeTimeoutSeconds: parsed.LAVALINK_RESUME_TIMEOUT_SECONDS,
+    reconnectTries: parsed.LAVALINK_RECONNECT_TRIES,
+    reconnectIntervalSeconds: parsed.LAVALINK_RECONNECT_INTERVAL_SECONDS,
+    restTimeoutSeconds: parsed.LAVALINK_REST_TIMEOUT_SECONDS,
+    voiceConnectionTimeoutSeconds: parsed.LAVALINK_VOICE_CONNECTION_TIMEOUT_SECONDS
+  },
   youtubeApiKey: parsed.YOUTUBE_API_KEY || null,
   spotify: parsed.SPOTIFY_CLIENT_ID && parsed.SPOTIFY_CLIENT_SECRET ? {
     clientId: parsed.SPOTIFY_CLIENT_ID,
@@ -59,5 +94,15 @@ export const appConfig = {
   botManagers: parsed.BOT_MANAGERS.split(",").map((value) => value.trim()).filter(Boolean),
   defaultVolume: parsed.DEFAULT_VOLUME,
   maxQueueSize: parsed.MAX_QUEUE_SIZE,
-  chatCommandDeleteAfterSeconds: parsed.CHAT_COMMAND_DELETE_AFTER_SECONDS
+  chatCommandDeleteAfterSeconds: parsed.CHAT_COMMAND_DELETE_AFTER_SECONDS,
+  lowBandwidthMode: parsed.LOW_BANDWIDTH_MODE,
+  idleVoiceDisconnectSeconds: parsed.IDLE_VOICE_DISCONNECT_SECONDS
+    ?? (parsed.LOW_BANDWIDTH_MODE ? 45 : 180),
+  playbackWatchdogIntervalSeconds: parsed.PLAYBACK_WATCHDOG_INTERVAL_SECONDS
+    ?? (parsed.LOW_BANDWIDTH_MODE ? 15 : 10),
+  stalePlayerUpdateSeconds: parsed.STALE_PLAYER_UPDATE_SECONDS
+    ?? (parsed.LOW_BANDWIDTH_MODE ? 45 : 30),
+  nowPlayingThumbnails: parsed.NOW_PLAYING_THUMBNAILS
+    ?? !parsed.LOW_BANDWIDTH_MODE,
+  preResolveNextTrack: parsed.PRE_RESOLVE_NEXT_TRACK
 };

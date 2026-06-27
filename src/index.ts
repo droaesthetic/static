@@ -1,23 +1,10 @@
 import { createBot } from "./bot/createBot.js";
 import { createDashboardServer } from "./dashboard/server.js";
 import { appConfig } from "./config.js";
+import { registerCrashHandler } from "./crashHandler.js";
 import type { MusicManager } from "./music/musicManager.js";
 
-process.on("unhandledRejection", (reason) => {
-  console.error("[process] unhandled promise rejection", reason);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("[process] uncaught exception", error);
-});
-
-process.on("warning", (warning) => {
-  console.warn("[process] warning", warning);
-});
-
-process.on("exit", (code) => {
-  console.log(`[process] exiting with code ${code}`);
-});
+const crashHandler = registerCrashHandler();
 
 async function main() {
   let music: MusicManager | null = null;
@@ -31,11 +18,24 @@ async function main() {
     console.error("[dashboard] server error", error);
   });
 
+  crashHandler.addCleanupHandler(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  }));
+
   const bot = await createBot();
   music = bot.music;
+  crashHandler.addCleanupHandler(() => {
+    bot.client.destroy();
+  });
 }
 
 main().catch((error) => {
-  console.error(error);
-  process.exit(1);
+  void crashHandler.shutdown("startup failure", error);
 });

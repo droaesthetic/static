@@ -1,8 +1,8 @@
 import play from "play-dl";
 import { randomUUID } from "node:crypto";
-import { fetch } from "undici";
+import { fetch, type Response as UndiciResponse } from "undici";
 import { appConfig } from "../config.js";
-import type { PlaybackProvider, Provider, ResolvedTrack, SearchResult } from "../types.js"; 
+import type { PlaybackProvider, Provider, ResolvedTrack, SearchResult } from "../types.js";
 
 interface ResolveOptions {
   query: string;
@@ -35,18 +35,21 @@ interface PlaybackSearchTarget {
   durationInSeconds?: number;
 }
 
-interface PlaybackCandidate { 
-  title: string; 
-  artist?: string; 
-  artwork?: string; 
-  durationInSeconds?: number; 
-  playbackProvider: Exclude<PlaybackProvider, "upload">; 
-  playbackUrl: string; 
-} 
+interface PlaybackCandidate {
+  title: string;
+  artist?: string;
+  artwork?: string;
+  durationInSeconds?: number;
+  playbackProvider: Exclude<PlaybackProvider, "upload">;
+  playbackUrl: string;
+}
 
 interface YouTubeVideoDetails {
   durationInSeconds: number | undefined;
   isMusic: boolean;
+  title?: string;
+  artist?: string;
+  artwork?: string;
 }
 
 interface SoundCloudOEmbedResponse {
@@ -89,9 +92,9 @@ interface SpotifyPlaylistTrackMetadata {
   url: string;
 }
 
-interface SpotifyApiTrack { 
-  type?: string; 
-  name?: string; 
+interface SpotifyApiTrack {
+  type?: string;
+  name?: string;
   duration_ms?: number;
   is_playable?: boolean;
   external_urls?: { spotify?: string };
@@ -99,8 +102,8 @@ interface SpotifyApiTrack {
     name?: string;
     images?: Array<{ url?: string; height?: number; width?: number }>;
   };
-  artists?: Array<{ name?: string }>; 
-} 
+  artists?: Array<{ name?: string }>;
+}
 
 interface SpotifySearchResponse {
   tracks?: {
@@ -145,7 +148,12 @@ interface YouTubeSearchResponse {
 interface YouTubeVideosResponse {
   items?: Array<{
     id?: string;
-    snippet?: { categoryId?: string };
+    snippet?: {
+      categoryId?: string;
+      channelTitle?: string;
+      thumbnails?: Record<string, { url?: string }>;
+      title?: string;
+    };
     contentDetails?: { duration?: string };
   }>;
 }
@@ -220,10 +228,10 @@ export class ProviderResolver {
       durationInSeconds: metadata.durationInSeconds
     };
     const playback = this.buildSpotifyPlaybackCandidate(playbackTarget, normalizedQuery)
-      ?? this.buildLavalinkSearchFallbackCandidate(playbackTarget) 
-      ?? await this.findPlayableAlternative(playbackTarget); 
+      ?? this.buildLavalinkSearchFallbackCandidate(playbackTarget)
+      ?? await this.findPlayableAlternative(playbackTarget);
 
-    return { 
+    return {
       title: metadata.title ?? playback.title ?? "Unknown title",
       artist: metadata.artist,
       url: normalizedQuery,
@@ -247,13 +255,13 @@ export class ProviderResolver {
     }
 
     const searchTarget = this.parseTypedSongQuery(normalizedQuery);
-    const results = (await this.collectRankedPlaybackCandidates(searchTarget)) 
+    const results = (await this.collectRankedPlaybackCandidates(searchTarget))
       .slice(0, limit)
-      .map((candidate) => ({  
-        title: candidate.title,  
-        artist: candidate.artist,  
-        url: candidate.playbackUrl, 
-        durationInSeconds: candidate.durationInSeconds, 
+      .map((candidate) => ({
+        title: candidate.title,
+        artist: candidate.artist,
+        url: candidate.playbackUrl,
+        durationInSeconds: candidate.durationInSeconds,
         playbackProvider: candidate.playbackProvider
       }));
 
@@ -266,18 +274,18 @@ export class ProviderResolver {
     }
 
     try {
-      const soundCloudResults = await play.search(normalizedQuery, { 
-        source: { soundcloud: "tracks" }, 
-        limit: this.searchCandidateLimit(limit) 
-      }); 
+      const soundCloudResults = await play.search(normalizedQuery, {
+        source: { soundcloud: "tracks" },
+        limit: this.searchCandidateLimit(limit)
+      });
 
-      return soundCloudResults 
-        .filter((track) => Boolean(track.url)) 
-        .slice(0, limit) 
-        .map((track) => ({ 
-          title: track.name ?? "Unknown title", 
-          artist: track.user?.name, 
-          url: track.url, 
+      return soundCloudResults
+        .filter((track) => Boolean(track.url))
+        .slice(0, limit)
+        .map((track) => ({
+          title: track.name ?? "Unknown title",
+          artist: track.user?.name,
+          url: track.url,
           durationInSeconds: track.durationInSec,
           playbackProvider: "soundcloud" as const
         }));
@@ -514,14 +522,14 @@ export class ProviderResolver {
     }
 
     return "search";
-  } 
+  }
 
-  private async resolveSearch(query: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> { 
+  private async resolveSearch(query: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
     const searchTarget = this.parseTypedSongQuery(query);
-    const playback = await this.findPlayableAlternative(searchTarget); 
-    return { 
-      ...playback, 
-      url: playback.playbackUrl, 
+    const playback = await this.findPlayableAlternative(searchTarget);
+    return {
+      ...playback,
+      url: playback.playbackUrl,
       requestedBy,
       requestedById,
       sourceProvider: "search",
@@ -531,27 +539,39 @@ export class ProviderResolver {
     };
   }
 
-  private async resolveYouTube(url: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> { 
-    const video = await play.video_info(url); 
-    await this.assertYouTubeMusicLink(url, video); 
-    const title = video.video_details.title ?? "Unknown title"; 
-    const artist = video.video_details.channel?.name; 
+  private async resolveYouTube(url: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
+    const video = await this.resolveYouTubeVideoInfo(url);
+    await this.assertYouTubeMusicLink(url, video);
+    const id = this.readYouTubeVideoId(url);
+    const apiDetails = video ? undefined : await this.fetchSingleYouTubeVideoDetails(id);
+    const title = video?.video_details.title ?? apiDetails?.title ?? "YouTube track";
+    const artist = video?.video_details.channel?.name ?? apiDetails?.artist;
+    const playbackUrl = this.buildYouTubePlaybackUrl(url, id) ?? url;
 
     return {
       id: randomUUID(),
       title,
       artist,
       url,
-      artwork: video.video_details.thumbnails?.at(-1)?.url,
-      durationInSeconds: Number(video.video_details.durationInSec) || undefined,
+      artwork: video?.video_details.thumbnails?.at(-1)?.url ?? apiDetails?.artwork,
+      durationInSeconds: Number(video?.video_details.durationInSec) || apiDetails?.durationInSeconds,
       requestedBy,
       requestedById,
       sourceProvider: "youtube",
       playbackProvider: "youtube",
-      playbackUrl: url,
+      playbackUrl,
       searchQuery: [artist, title].filter(Boolean).join(" ") || title,
       addedAt: new Date().toISOString()
     };
+  }
+
+  private async resolveYouTubeVideoInfo(url: string) {
+    try {
+      return await play.video_info(url);
+    } catch (error) {
+      console.warn("[youtube] play-dl metadata lookup failed; deferring playback resolution to Lavalink.", error);
+      return undefined;
+    }
   }
 
   private async resolveSoundCloud(url: string, requestedBy: string, requestedById: string): Promise<ResolvedTrack> {
@@ -755,12 +775,12 @@ export class ProviderResolver {
   }
 
   private async findPlayableAlternativeFromQueries(target: PlaybackSearchTarget) {
-    const rankedResults = await this.collectRankedPlaybackCandidates(target); 
-    if (rankedResults.length) { 
-      const [bestVideo] = rankedResults; 
-      return { 
-        title: bestVideo.title, 
-        artist: bestVideo.artist, 
+    const rankedResults = await this.collectRankedPlaybackCandidates(target);
+    if (rankedResults.length) {
+      const [bestVideo] = rankedResults;
+      return {
+        title: bestVideo.title,
+        artist: bestVideo.artist,
         artwork: bestVideo.artwork,
         durationInSeconds: bestVideo.durationInSeconds,
         playbackProvider: bestVideo.playbackProvider,
@@ -768,48 +788,48 @@ export class ProviderResolver {
       };
     }
 
-    const lavalinkSearchFallback = this.buildLavalinkSearchFallbackCandidate(target); 
+    const lavalinkSearchFallback = this.buildLavalinkSearchFallbackCandidate(target);
     if (!lavalinkSearchFallback) {
-      throw new Error("No playable match found for that link."); 
-    } 
- 
+      throw new Error("No playable match found for that link.");
+    }
+
     console.warn(
       `[resolver] falling back to Lavalink YouTube Music search for "${lavalinkSearchFallback.searchQuery}"`
     );
     return lavalinkSearchFallback;
-  } 
+  }
 
-  private async collectRankedPlaybackCandidates(  
-    target: PlaybackSearchTarget, 
+  private async collectRankedPlaybackCandidates(
+    target: PlaybackSearchTarget,
     provider?: Exclude<PlaybackProvider, "upload">
-  ): Promise<Array<PlaybackCandidate & { score: number }>> { 
-    const searchQueries = this.buildPlaybackSearchQueries(target); 
-    const candidates = new Map<string, PlaybackCandidate>(); 
+  ): Promise<Array<PlaybackCandidate & { score: number }>> {
+    const searchQueries = this.buildPlaybackSearchQueries(target);
+    const candidates = new Map<string, PlaybackCandidate>();
 
     if ((!provider || provider === "spotify") && appConfig.spotify) {
       const spotifyResults = await Promise.allSettled(
-        searchQueries.map((query) => 
-          this.withTimeout( 
+        searchQueries.map((query) =>
+          this.withTimeout(
             this.collectSpotifyCandidates(query, 10),
-            12000, 
+            12000,
             `Spotify candidate search timed out for query: ${query}`
-          ) 
-        ) 
-      ); 
+          )
+        )
+      );
 
       for (const result of spotifyResults) {
-        if (result.status !== "fulfilled") { 
+        if (result.status !== "fulfilled") {
           console.warn("[resolver] Spotify candidate query failed", result.reason);
-          continue; 
-        } 
+          continue;
+        }
 
         for (const candidate of result.value) {
           candidates.set(candidate.playbackUrl.toLowerCase(), candidate);
         }
-      } 
-    } 
+      }
+    }
 
-    if ((!provider || provider === "soundcloud") && this.soundCloudSearchEnabled) { 
+    if ((!provider || provider === "soundcloud") && this.soundCloudSearchEnabled) {
       const soundCloudResults = await Promise.allSettled(
         searchQueries.slice(0, 3).map((query) =>
           this.withTimeout(
@@ -829,8 +849,8 @@ export class ProviderResolver {
         for (const candidate of result.value) {
           candidates.set(candidate.playbackUrl.toLowerCase(), candidate);
         }
-      } 
-    } 
+      }
+    }
 
     if (!provider || provider === "youtube") {
       const youtubeResults = await Promise.allSettled(
@@ -857,16 +877,16 @@ export class ProviderResolver {
 
     const filteredCandidates = this.filterUnrequestedEditCandidates([...candidates.values()], target);
 
-    return filteredCandidates  
-      .map((candidate) => ({  
-        ...candidate,  
-        score: this.scoreCandidate(candidate, target)  
-      })) 
-      .sort((left, right) => 
+    return filteredCandidates
+      .map((candidate) => ({
+        ...candidate,
+        score: this.scoreCandidate(candidate, target)
+      }))
+      .sort((left, right) =>
         this.playbackProviderPriority(right.playbackProvider) - this.playbackProviderPriority(left.playbackProvider)
         || right.score - left.score
-      );  
-  }  
+      );
+  }
 
   private buildLavalinkSearchFallbackCandidate(target: PlaybackSearchTarget) {
     const query = this.buildLavalinkSearchFallbackQuery(target);
@@ -885,7 +905,7 @@ export class ProviderResolver {
     };
   }
 
-  private buildLavalinkSearchFallbackQuery(target: PlaybackSearchTarget) { 
+  private buildLavalinkSearchFallbackQuery(target: PlaybackSearchTarget) {
     const title = target.title?.trim();
     const artist = target.artist?.trim() ?? target.artists?.[0]?.trim();
     const cleanedQuery = this.cleanTypedSongQuery(target.query);
@@ -894,8 +914,8 @@ export class ProviderResolver {
       return `${artist} - ${title}`;
     }
 
-    return cleanedQuery || target.query.trim(); 
-  } 
+    return cleanedQuery || target.query.trim();
+  }
 
   private playbackProviderPriority(provider: Exclude<PlaybackProvider, "upload">) {
     switch (provider) {
@@ -908,8 +928,8 @@ export class ProviderResolver {
         return 1;
     }
   }
- 
-  private async findAutoplayAlternative(  
+
+  private async findAutoplayAlternative(
     seedTrack: Pick<ResolvedTrack, "title" | "artist" | "playbackUrl" | "url" | "durationInSeconds">,
     recentTracks: Array<Pick<ResolvedTrack, "title" | "artist" | "playbackUrl" | "url">>
   ): Promise<PlaybackCandidate> {
@@ -957,15 +977,15 @@ export class ProviderResolver {
       }
     });
 
-    const rankedCandidates = this.filterUnrequestedEditCandidates([...candidateMap.values()]) 
-      .map((candidate) => ({  
-        candidate,  
-        score: this.scoreAutoplayCandidate(candidate, seedTrack)  
-      })) 
-      .sort((left, right) => 
+    const rankedCandidates = this.filterUnrequestedEditCandidates([...candidateMap.values()])
+      .map((candidate) => ({
+        candidate,
+        score: this.scoreAutoplayCandidate(candidate, seedTrack)
+      }))
+      .sort((left, right) =>
         this.playbackProviderPriority(right.candidate.playbackProvider) - this.playbackProviderPriority(left.candidate.playbackProvider)
         || right.score - left.score
-      ); 
+      );
 
     const strictCandidates = rankedCandidates
       .filter(({ candidate }) => !recentUrlSet.has(candidate.playbackUrl.toLowerCase()))
@@ -1021,7 +1041,7 @@ export class ProviderResolver {
     searchUrl.searchParams.set("part", "snippet");
     searchUrl.searchParams.set("type", "video");
     searchUrl.searchParams.set("videoCategoryId", youtubeMusicCategoryId);
-    searchUrl.searchParams.set("maxResults", String(this.searchCandidateLimit(limit))); 
+    searchUrl.searchParams.set("maxResults", String(this.searchCandidateLimit(limit)));
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("key", appConfig.youtubeApiKey);
 
@@ -1058,47 +1078,47 @@ export class ProviderResolver {
 
     return videos
       .filter((candidate) => !this.isLikelyNonSongYouTubeResult(candidate.title, candidate.artist))
-      .filter(({ id }) => details.get(id)?.isMusic !== false) 
-      .map(({ id, ...candidate }) => ({ 
-        ...candidate, 
-        durationInSeconds: details.get(id)?.durationInSeconds 
+      .filter(({ id }) => details.get(id)?.isMusic !== false)
+      .map(({ id, ...candidate }) => ({
+        ...candidate,
+        durationInSeconds: details.get(id)?.durationInSeconds
       }))
-      .sort((left, right) => this.scoreQueryOnlyCandidate(right, query) - this.scoreQueryOnlyCandidate(left, query)) 
-      .slice(0, limit); 
-  } 
+      .sort((left, right) => this.scoreQueryOnlyCandidate(right, query) - this.scoreQueryOnlyCandidate(left, query))
+      .slice(0, limit);
+  }
 
-  private async collectPlayDlYouTubeCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> { 
-    const youtubeResults = await play.search(query, { 
-      limit: this.searchCandidateLimit(limit), 
-      source: { youtube: "video" } 
-    }); 
+  private async collectPlayDlYouTubeCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> {
+    const youtubeResults = await play.search(query, {
+      limit: this.searchCandidateLimit(limit),
+      source: { youtube: "video" }
+    });
 
-    return youtubeResults 
+    return youtubeResults
       .map((video) => {
         const playbackUrl = this.buildYouTubePlaybackUrl(video.url, "id" in video ? video.id : undefined);
         if (!playbackUrl) {
           return null;
         }
 
-        if (this.isLikelyNonSongYouTubeResult(video.title, video.channel?.name)) {  
-          return null;  
-        }  
+        if (this.isLikelyNonSongYouTubeResult(video.title, video.channel?.name)) {
+          return null;
+        }
 
         return {
           title: video.title ?? "Unknown title",
           artist: video.channel?.name,
           artwork: video.thumbnails?.at(-1)?.url,
           durationInSeconds: video.durationInSec,
-          playbackProvider: "youtube" as const, 
-          playbackUrl 
-        }; 
-      }) 
-      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null) 
-      .sort((left, right) => this.scoreQueryOnlyCandidate(right, query) - this.scoreQueryOnlyCandidate(left, query)) 
-      .slice(0, limit); 
-  } 
+          playbackProvider: "youtube" as const,
+          playbackUrl
+        };
+      })
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+      .sort((left, right) => this.scoreQueryOnlyCandidate(right, query) - this.scoreQueryOnlyCandidate(left, query))
+      .slice(0, limit);
+  }
 
-  private async collectPlaybackCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> { 
+  private async collectPlaybackCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> {
     const spotifyCandidates = appConfig.spotify
       ? await this.collectSpotifyCandidates(query, limit).catch((error) => {
         console.warn("[resolver] Spotify autoplay candidates unavailable", error);
@@ -1106,8 +1126,8 @@ export class ProviderResolver {
       })
       : [];
 
-    let soundCloudCandidates: PlaybackCandidate[] = []; 
-    if (this.soundCloudSearchEnabled) { 
+    let soundCloudCandidates: PlaybackCandidate[] = [];
+    if (this.soundCloudSearchEnabled) {
       try {
       const soundCloudResults = await play.search(query, {
         source: { soundcloud: "tracks" },
@@ -1126,16 +1146,21 @@ export class ProviderResolver {
         }));
       } catch (error) {
         this.handleSoundCloudSearchError("[resolver] SoundCloud autoplay candidates unavailable", error);
-      } 
-    } 
+      }
+    }
 
-    const youtubeCandidates = await this.collectYouTubeCandidates(query, limit); 
- 
-    return [...spotifyCandidates, ...soundCloudCandidates, ...youtubeCandidates]; 
-  } 
+    const youtubeCandidates = await this.collectYouTubeCandidates(query, limit);
+
+    return [...spotifyCandidates, ...soundCloudCandidates, ...youtubeCandidates];
+  }
 
   private async collectSpotifyCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> {
     if (!appConfig.spotify) {
+      return [];
+    }
+
+    const spotifyQuery = this.buildSpotifySearchQuery(query);
+    if (!spotifyQuery) {
       return [];
     }
 
@@ -1144,7 +1169,7 @@ export class ProviderResolver {
     searchUrl.searchParams.set("type", "track");
     searchUrl.searchParams.set("market", "US");
     searchUrl.searchParams.set("limit", String(this.searchCandidateLimit(limit)));
-    searchUrl.searchParams.set("q", query);
+    searchUrl.searchParams.set("q", spotifyQuery);
 
     const result = await this.fetchSpotifyJson<SpotifySearchResponse>(searchUrl.toString(), token);
     return (result.tracks?.items ?? [])
@@ -1162,7 +1187,7 @@ export class ProviderResolver {
       .slice(0, limit);
   }
 
-  private async collectYouTubeCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> { 
+  private async collectYouTubeCandidates(query: string, limit: number): Promise<PlaybackCandidate[]> {
     if (appConfig.youtubeApiKey) {
       try {
         const apiCandidates = await this.collectYouTubeDataApiCandidates(query, limit);
@@ -1431,41 +1456,41 @@ export class ProviderResolver {
     };
   }
 
-  private async resolveSpotifyPlaylistTrack( 
-    track: SpotifyPlaylistTrackMetadata, 
-    requestedBy: string, 
-    requestedById: string 
-  ): Promise<ResolvedTrack> { 
-    const [artist] = track.artists; 
-    const playbackSearch = [artist, track.title].filter(Boolean).join(" - ") || track.title; 
+  private async resolveSpotifyPlaylistTrack(
+    track: SpotifyPlaylistTrackMetadata,
+    requestedBy: string,
+    requestedById: string
+  ): Promise<ResolvedTrack> {
+    const [artist] = track.artists;
+    const playbackSearch = [artist, track.title].filter(Boolean).join(" - ") || track.title;
     const playbackTarget = {
-      query: playbackSearch, 
-      title: track.title, 
-      artist, 
-      artists: track.artists, 
-      album: track.album, 
-      durationInSeconds: track.durationInSeconds 
+      query: playbackSearch,
+      title: track.title,
+      artist,
+      artists: track.artists,
+      album: track.album,
+      durationInSeconds: track.durationInSeconds
     };
     const playback = this.buildSpotifyPlaybackCandidate(playbackTarget, track.url)
-      ?? this.buildLavalinkSearchFallbackCandidate(playbackTarget) 
+      ?? this.buildLavalinkSearchFallbackCandidate(playbackTarget)
       ?? await this.findPlayableAlternative(playbackTarget);
- 
-    return { 
-      id: randomUUID(), 
-      title: track.title, 
-      artist, 
-      url: track.url || `https://open.spotify.com/search/${encodeURIComponent(playbackSearch)}`, 
-      artwork: track.artwork ?? playback.artwork, 
-      durationInSeconds: track.durationInSeconds ?? playback.durationInSeconds, 
-      requestedBy, 
-      requestedById, 
-      sourceProvider: "spotify", 
-      playbackProvider: playback.playbackProvider, 
-      playbackUrl: playback.playbackUrl, 
-      searchQuery: playbackSearch, 
-      addedAt: new Date().toISOString() 
-    }; 
-  }  
+
+    return {
+      id: randomUUID(),
+      title: track.title,
+      artist,
+      url: track.url || `https://open.spotify.com/search/${encodeURIComponent(playbackSearch)}`,
+      artwork: track.artwork ?? playback.artwork,
+      durationInSeconds: track.durationInSeconds ?? playback.durationInSeconds,
+      requestedBy,
+      requestedById,
+      sourceProvider: "spotify",
+      playbackProvider: playback.playbackProvider,
+      playbackUrl: playback.playbackUrl,
+      searchQuery: playbackSearch,
+      addedAt: new Date().toISOString()
+    };
+  }
 
   private buildSpotifyPlaybackCandidate(target: PlaybackSearchTarget, url: string | undefined) {
     if (!appConfig.spotify || !url) {
@@ -1487,8 +1512,8 @@ export class ProviderResolver {
       searchQuery: this.buildLavalinkSearchFallbackQuery(target)
     };
   }
- 
-  private async getSpotifyAccessToken() { 
+
+  private async getSpotifyAccessToken() {
     if (!appConfig.spotify) {
       throw new Error("Spotify API credentials are not configured.");
     }
@@ -1532,10 +1557,30 @@ export class ProviderResolver {
     });
 
     if (!response.ok) {
-      throw new Error(`Spotify API request failed (${response.status}).`);
+      const details = await this.readSpotifyErrorDetails(response);
+      throw new Error(`Spotify API request failed (${response.status})${details ? `: ${details}` : ""}.`);
     }
 
     return await response.json() as T;
+  }
+
+  private async readSpotifyErrorDetails(response: UndiciResponse) {
+    const contentType = response.headers.get("content-type") ?? "";
+    try {
+      if (contentType.includes("application/json")) {
+        const data = await response.json() as { error?: { message?: string; reason?: string } | string };
+        if (typeof data.error === "string") {
+          return data.error;
+        }
+
+        return [data.error?.message, data.error?.reason].filter(Boolean).join(" - ");
+      }
+
+      const text = await response.text();
+      return text.trim().slice(0, 240);
+    } catch {
+      return "";
+    }
   }
 
   private readSpotifyPlaylistId(url: string) {
@@ -1878,31 +1923,31 @@ export class ProviderResolver {
       score += artistMatchCount * 10;
     }
 
-    const candidateDescriptorSource = `${normalizedCandidateTitle} ${normalizedCandidateArtist}`; 
-    score += this.versionPreferenceScore(candidateDescriptorSource, target.query, target.title); 
- 
-    const lowerCandidateTitle = candidate.title?.toLowerCase() ?? ""; 
-    const lowerCandidateArtist = candidate.artist?.toLowerCase() ?? ""; 
+    const candidateDescriptorSource = `${normalizedCandidateTitle} ${normalizedCandidateArtist}`;
+    score += this.versionPreferenceScore(candidateDescriptorSource, target.query, target.title);
 
-    if (!target.title && !target.artist && !target.durationInSeconds) { 
+    const lowerCandidateTitle = candidate.title?.toLowerCase() ?? "";
+    const lowerCandidateArtist = candidate.artist?.toLowerCase() ?? "";
+
+    if (!target.title && !target.artist && !target.durationInSeconds) {
       return this.scoreQueryOnlyCandidate(candidate, target.query);
     }
 
-    if (normalizedTargetArtist) { 
-      const channelMentionsArtist = normalizedCandidateArtist.includes(normalizedTargetArtist) 
-        || normalizedTargetArtist.includes(normalizedCandidateArtist); 
-      const titleMentionsArtist = normalizedCandidateTitle.includes(normalizedTargetArtist); 
- 
-      if (channelMentionsArtist && lowerCandidateArtist.includes("- topic")) { 
-        score += 24; 
-      } else if (channelMentionsArtist && /vevo|official/i.test(lowerCandidateArtist)) { 
-        score += 14; 
-      } else if (channelMentionsArtist) { 
-        score += 8; 
-      } else if (!titleMentionsArtist) { 
-        score -= 45; 
-      } 
-    } 
+    if (normalizedTargetArtist) {
+      const channelMentionsArtist = normalizedCandidateArtist.includes(normalizedTargetArtist)
+        || normalizedTargetArtist.includes(normalizedCandidateArtist);
+      const titleMentionsArtist = normalizedCandidateTitle.includes(normalizedTargetArtist);
+
+      if (channelMentionsArtist && lowerCandidateArtist.includes("- topic")) {
+        score += 24;
+      } else if (channelMentionsArtist && /vevo|official/i.test(lowerCandidateArtist)) {
+        score += 14;
+      } else if (channelMentionsArtist) {
+        score += 8;
+      } else if (!titleMentionsArtist) {
+        score -= 45;
+      }
+    }
 
     if (normalizedTargetAlbum && candidateDescriptorSource.includes(normalizedTargetAlbum)) {
       score += 6;
@@ -1916,9 +1961,9 @@ export class ProviderResolver {
       score += 4;
     }
 
-    const lyricPref = this.lyricVideoPreferenceBonus(lowerCandidateTitle, lowerCandidateArtist); 
-    score += lyricPref; 
-    score -= this.musicVideoPreferencePenalty(lowerCandidateTitle, lowerCandidateArtist, lyricPref > 0); 
+    const lyricPref = this.lyricVideoPreferenceBonus(lowerCandidateTitle, lowerCandidateArtist);
+    score += lyricPref;
+    score -= this.musicVideoPreferencePenalty(lowerCandidateTitle, lowerCandidateArtist, lyricPref > 0);
     score -= this.unrequestedLivePerformancePenalty(
       lowerCandidateTitle,
       lowerCandidateArtist,
@@ -1947,9 +1992,9 @@ export class ProviderResolver {
 
     const strongerUnwantedTerms = [
       "visualizer",
-      "bass boosted", 
-      "8d", 
-      "amv" 
+      "bass boosted",
+      "8d",
+      "amv"
     ];
 
     for (const unwantedTerm of strongerUnwantedTerms) {
@@ -1987,22 +2032,22 @@ export class ProviderResolver {
     return 0;
   }
 
-  private scoreQueryOnlyCandidate(candidate: Pick<ResolvedTrack, "title" | "artist">, query = ""): number { 
+  private scoreQueryOnlyCandidate(candidate: Pick<ResolvedTrack, "title" | "artist">, query = ""): number {
     const normalizedQuery = this.normalizeForMatch(query);
     const normalizedCandidateTitle = this.normalizeForMatch(candidate.title);
     const normalizedCandidateArtist = this.normalizeForMatch(candidate.artist);
     const descriptor = `${normalizedCandidateTitle} ${normalizedCandidateArtist}`.trim();
-    const lowerTitle = candidate.title?.toLowerCase() ?? ""; 
-    const lowerArtist = candidate.artist?.toLowerCase() ?? ""; 
-    const lyricPref = this.lyricVideoPreferenceBonus(lowerTitle, lowerArtist);  
-    let score = lyricPref 
-      + this.versionPreferenceScore(descriptor, query) 
-      - this.musicVideoPreferencePenalty(lowerTitle, lowerArtist, lyricPref > 0) 
+    const lowerTitle = candidate.title?.toLowerCase() ?? "";
+    const lowerArtist = candidate.artist?.toLowerCase() ?? "";
+    const lyricPref = this.lyricVideoPreferenceBonus(lowerTitle, lowerArtist);
+    let score = lyricPref
+      + this.versionPreferenceScore(descriptor, query)
+      - this.musicVideoPreferencePenalty(lowerTitle, lowerArtist, lyricPref > 0)
       - this.unrequestedLivePerformancePenalty(lowerTitle, lowerArtist, this.isLiveVersionRequested(query))
-      - this.nonSongYouTubeResultPenalty(lowerTitle, lowerArtist, this.isNonSongVariantRequested(query));  
- 
-    if (!normalizedQuery || !descriptor) { 
-      return score; 
+      - this.nonSongYouTubeResultPenalty(lowerTitle, lowerArtist, this.isNonSongVariantRequested(query));
+
+    if (!normalizedQuery || !descriptor) {
+      return score;
     }
 
     if (normalizedCandidateTitle === normalizedQuery) {
@@ -2016,44 +2061,44 @@ export class ProviderResolver {
     score += Math.round(this.tokenOverlap(normalizedCandidateTitle, normalizedQuery) * 70);
     score += Math.round(this.tokenOverlap(descriptor, normalizedQuery) * 35);
 
-    return score; 
-  } 
-
-  private versionPreferenceScore(descriptor: string, ...requestedValues: Array<string | undefined>): number {   
-    const normalizedDescriptor = this.normalizeVersionText(descriptor);   
-    const normalizedRequest = this.normalizeVersionText(requestedValues.filter(Boolean).join(" "));   
-    const liveRequested = this.hasLiveVersionTerm(normalizedRequest);  
-    const variantRequested = this.hasAvoidedVersionTerm(normalizedRequest);  
-    const originalRequested = this.isOriginalVersionRequested(normalizedRequest);  
-    const hasLive = this.hasLiveVersionTerm(normalizedDescriptor);  
-    const hasAvoidedVariant = this.hasAvoidedVersionTerm(normalizedDescriptor);  
-  
-    if (hasLive) {  
-      return liveRequested ? 35 : -180;  
-    }  
-  
-    if (hasAvoidedVariant) {  
-      return variantRequested ? 35 : -90;  
-    }  
-  
-    if (originalRequested) {  
-      return 14;  
-    }  
-  
-    return 0; 
-  } 
-
-  private hasAvoidedVersionTerm(normalizedValue: string): boolean {   
-    return /\b(?:remix|re\s?mix|reimagined|rework|remake|cover|edit|flip|bootleg|mashup|slowed|reverb|sped\s+up|nightcore|acoustic|instrumental|orchestral|piano|lofi)\b/.test(normalizedValue);   
-  }   
-
-  private readRequestedVersionTerm(normalizedValue: string): string { 
-    return this.normalizeVersionText(normalizedValue).match(/\b(?:remix|re\s?mix|reimagined|rework|remake|cover|edit|flip|bootleg|mashup|slowed|reverb|sped\s+up|nightcore|acoustic|instrumental|orchestral|piano|lofi)\b/)?.[0] ?? ""; 
+    return score;
   }
-  
-  private isOriginalVersionRequested(normalizedValue: string): boolean {  
-    return /\b(?:original|official|studio|album\s+version|radio\s+edit|topic)\b/.test(normalizedValue);  
-  }  
+
+  private versionPreferenceScore(descriptor: string, ...requestedValues: Array<string | undefined>): number {
+    const normalizedDescriptor = this.normalizeVersionText(descriptor);
+    const normalizedRequest = this.normalizeVersionText(requestedValues.filter(Boolean).join(" "));
+    const liveRequested = this.hasLiveVersionTerm(normalizedRequest);
+    const variantRequested = this.hasAvoidedVersionTerm(normalizedRequest);
+    const originalRequested = this.isOriginalVersionRequested(normalizedRequest);
+    const hasLive = this.hasLiveVersionTerm(normalizedDescriptor);
+    const hasAvoidedVariant = this.hasAvoidedVersionTerm(normalizedDescriptor);
+
+    if (hasLive) {
+      return liveRequested ? 35 : -180;
+    }
+
+    if (hasAvoidedVariant) {
+      return variantRequested ? 35 : -90;
+    }
+
+    if (originalRequested) {
+      return 14;
+    }
+
+    return 0;
+  }
+
+  private hasAvoidedVersionTerm(normalizedValue: string): boolean {
+    return /\b(?:remix|re\s?mix|reimagined|rework|remake|cover|edit|flip|bootleg|mashup|slowed|reverb|sped\s+up|nightcore|acoustic|instrumental|orchestral|piano|lofi)\b/.test(normalizedValue);
+  }
+
+  private readRequestedVersionTerm(normalizedValue: string): string {
+    return this.normalizeVersionText(normalizedValue).match(/\b(?:remix|re\s?mix|reimagined|rework|remake|cover|edit|flip|bootleg|mashup|slowed|reverb|sped\s+up|nightcore|acoustic|instrumental|orchestral|piano|lofi)\b/)?.[0] ?? "";
+  }
+
+  private isOriginalVersionRequested(normalizedValue: string): boolean {
+    return /\b(?:original|official|studio|album\s+version|radio\s+edit|topic)\b/.test(normalizedValue);
+  }
 
   private filterUnrequestedEditCandidates<T extends PlaybackCandidate>(candidates: T[], target?: PlaybackSearchTarget): T[] {
     const liveRequested = this.isLiveVersionRequested(target?.query, target?.title);
@@ -2094,12 +2139,12 @@ export class ProviderResolver {
     return values.some((value) => /\bedit(?:s|ed)?\b/i.test(value ?? ""));
   }
 
-  private isEditVersionCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">): boolean { 
-    return /\bedit(?:s|ed)?\b/i.test(`${candidate.title} ${candidate.artist ?? ""}`); 
-  } 
- 
-  /** Down-rank obvious music-video titles when a lyric-style upload was not detected. */ 
-  private musicVideoPreferencePenalty(lowerTitle: string, lowerArtist: string, looksLikeLyricUpload: boolean): number { 
+  private isEditVersionCandidate(candidate: Pick<PlaybackCandidate, "title" | "artist">): boolean {
+    return /\bedit(?:s|ed)?\b/i.test(`${candidate.title} ${candidate.artist ?? ""}`);
+  }
+
+  /** Down-rank obvious music-video titles when a lyric-style upload was not detected. */
+  private musicVideoPreferencePenalty(lowerTitle: string, lowerArtist: string, looksLikeLyricUpload: boolean): number {
     if (looksLikeLyricUpload || /\blyric/i.test(`${lowerTitle} ${lowerArtist}`)) {
       return 0;
     }
@@ -2191,17 +2236,17 @@ export class ProviderResolver {
 
     const lt = candidate.title?.toLowerCase() ?? "";
     const la = candidate.artist?.toLowerCase() ?? "";
-    const lyricPref = this.lyricVideoPreferenceBonus(lt, la); 
-    score += lyricPref; 
+    const lyricPref = this.lyricVideoPreferenceBonus(lt, la);
+    score += lyricPref;
     score += this.versionPreferenceScore(candidateDescriptorSource);
-    score -= this.musicVideoPreferencePenalty(lt, la, lyricPref > 0);  
+    score -= this.musicVideoPreferencePenalty(lt, la, lyricPref > 0);
     score -= this.unrequestedLivePerformancePenalty(lt, la, false);
-    score -= this.nonSongYouTubeResultPenalty(lt, la, false); 
-  
-    for (const unwantedTerm of ["karaoke", "visualizer", "bass boosted", "8d"]) {  
-      if (candidateDescriptorSource.includes(unwantedTerm)) {  
-        score -= 22; 
-      } 
+    score -= this.nonSongYouTubeResultPenalty(lt, la, false);
+
+    for (const unwantedTerm of ["karaoke", "visualizer", "bass boosted", "8d"]) {
+      if (candidateDescriptorSource.includes(unwantedTerm)) {
+        score -= 22;
+      }
     }
 
     if (seedTrack.durationInSeconds && candidate.durationInSeconds) {
@@ -2245,29 +2290,29 @@ export class ProviderResolver {
       ...(target.artists ?? []),
       ...(target.artist ? [target.artist] : [])
     ].map((artist) => artist.trim()).filter(Boolean));
-    const primaryArtist = artists[0]; 
-    const album = target.album?.trim(); 
+    const primaryArtist = artists[0];
+    const album = target.album?.trim();
     const cleanedQuery = this.cleanTypedSongQuery(target.query);
- 
-    return this.uniqueValues([ 
-      target.query.trim(), 
+
+    return this.uniqueValues([
+      target.query.trim(),
       cleanedQuery && cleanedQuery !== target.query.trim() ? cleanedQuery : undefined,
-      primaryArtist && title ? `${primaryArtist} - ${title}` : undefined, 
-      primaryArtist && title ? `${primaryArtist} ${title}` : undefined, 
-      primaryArtist && title ? `${title} ${primaryArtist}` : undefined, 
-      primaryArtist && title ? `${primaryArtist} ${title} official audio` : undefined,   
-      primaryArtist && title ? `${primaryArtist} ${title} topic` : undefined,   
-      primaryArtist && title ? `${primaryArtist} ${title} lyrics` : undefined,   
-      primaryArtist && title && this.hasAvoidedVersionTerm(cleanedQuery) ? `${primaryArtist} ${title} ${this.readRequestedVersionTerm(cleanedQuery)}` : undefined,    
-      primaryArtist && title && album ? `${primaryArtist} ${title} ${album}` : undefined,   
-      artists.length > 1 && title ? `${artists.join(" ")} ${title}` : undefined,  
-      !title && cleanedQuery ? `${cleanedQuery} official audio` : undefined,  
-      !title && cleanedQuery ? `${cleanedQuery} lyrics` : undefined,  
-      !title && cleanedQuery ? `${cleanedQuery} topic` : undefined,  
+      primaryArtist && title ? `${primaryArtist} - ${title}` : undefined,
+      primaryArtist && title ? `${primaryArtist} ${title}` : undefined,
+      primaryArtist && title ? `${title} ${primaryArtist}` : undefined,
+      primaryArtist && title ? `${primaryArtist} ${title} official audio` : undefined,
+      primaryArtist && title ? `${primaryArtist} ${title} topic` : undefined,
+      primaryArtist && title ? `${primaryArtist} ${title} lyrics` : undefined,
+      primaryArtist && title && this.hasAvoidedVersionTerm(cleanedQuery) ? `${primaryArtist} ${title} ${this.readRequestedVersionTerm(cleanedQuery)}` : undefined,
+      primaryArtist && title && album ? `${primaryArtist} ${title} ${album}` : undefined,
+      artists.length > 1 && title ? `${artists.join(" ")} ${title}` : undefined,
+      !title && cleanedQuery ? `${cleanedQuery} official audio` : undefined,
+      !title && cleanedQuery ? `${cleanedQuery} lyrics` : undefined,
+      !title && cleanedQuery ? `${cleanedQuery} topic` : undefined,
       !title && cleanedQuery && this.hasAvoidedVersionTerm(cleanedQuery) ? `${cleanedQuery} ${this.readRequestedVersionTerm(cleanedQuery)}` : undefined,
       ...(!title && cleanedQuery ? this.buildBareSongGuessQueries(cleanedQuery) : [])
-    ].filter((query): query is string => Boolean(query)));   
-  }   
+    ].filter((query): query is string => Boolean(query)));
+  }
 
   private buildBareSongGuessQueries(query: string) {
     const tokens = this.normalizeForMatch(query).split(" ").filter(Boolean);
@@ -2294,6 +2339,23 @@ export class ProviderResolver {
     }
 
     return guesses;
+  }
+
+  private buildSpotifySearchQuery(query: string) {
+    const cleanedQuery = this.cleanTypedSongQuery(query)
+      .replace(/[^\S\r\n]+/g, " ")
+      .replace(/[\u0000-\u001F\u007F]/g, " ")
+      .trim();
+
+    if (!cleanedQuery) {
+      return "";
+    }
+
+    return cleanedQuery
+      .split(/\s+/)
+      .filter((token) => !/^(?:album|artist|track|year|genre|isrc|upc):$/i.test(token))
+      .join(" ")
+      .trim();
   }
 
   private parseTypedSongQuery(query: string): PlaybackSearchTarget {
@@ -2338,12 +2400,12 @@ export class ProviderResolver {
       .trim();
   }
 
-  private parseSpotifyDescriptionParts(description: string | undefined) { 
+  private parseSpotifyDescriptionParts(description: string | undefined) {
     const cleanedDescription = this.cleanProviderDecorations(description, "spotify");
     return cleanedDescription
       ?.replace(/^listen to\s+/i, "")
       .replace(/\s+on spotify\.?$/i, "")
-      .split(/\s*[Â·•]\s*/)
+      .split(/\s*(?:\xB7|\u2022)\s*/)
       .map((part) => part.trim())
       .filter((part) => Boolean(part) && !/^song$/i.test(part) && !/^\d{4}$/.test(part))
       ?? [];
@@ -2433,15 +2495,15 @@ export class ProviderResolver {
     return parts.length > 1 ? parts[0].trim() : undefined;
   }
 
-  private normalizeForMatch(value: string | undefined): string { 
-    return (value ?? "") 
-      .toLowerCase() 
+  private normalizeForMatch(value: string | undefined): string {
+    return (value ?? "")
+      .toLowerCase()
       .replace(/\([^)]*\)/g, " ")
       .replace(/\[[^\]]*]/g, " ")
       .replace(/[^\p{L}\p{N}]+/gu, " ")
       .replace(/\s+/g, " ")
-      .trim(); 
-  } 
+      .trim();
+  }
 
   private normalizeVersionText(value: string | undefined): string {
     return (value ?? "")
@@ -2510,42 +2572,51 @@ export class ProviderResolver {
     }
   }
 
-  private async assertYouTubeMusicLink(url: string, video?: Awaited<ReturnType<typeof play.video_info>>) { 
-    const id = this.readYouTubeVideoId(url); 
-    if (!id) { 
-      throw new Error("That YouTube link is not a valid video link."); 
-    } 
- 
-    if (this.isYouTubeMusicUrl(url)) {
+  private async assertYouTubeMusicLink(url: string, video?: Awaited<ReturnType<typeof play.video_info>>) {
+    const id = this.readYouTubeVideoId(url);
+    if (!id) {
+      throw new Error("That YouTube link is not a valid video link.");
+    }
+
+    if (this.isYouTubeMusicUrl(url) || this.isYouTubeShortShareUrl(url)) {
       return;
     }
 
-    if (this.isYouTubeTopicVideo(video)) { 
-      return; 
-    } 
- 
-    if (!appConfig.youtubeApiKey) { 
-      throw new Error("Only YouTube Music links are allowed. Use a music.youtube.com song link, or configure YOUTUBE_API_KEY so the bot can verify Music-category YouTube videos.");
+    if (this.isYouTubeTopicVideo(video)) {
+      return;
+    }
+
+    if (!appConfig.youtubeApiKey) {
+      throw new Error("Only YouTube Music links or youtu.be share links are allowed. Use a music.youtube.com song link, a youtu.be share link, or configure YOUTUBE_API_KEY so the bot can verify Music-category YouTube videos.");
     }
 
     const details = await this.fetchYouTubeVideoDetails([id]);
     if (details.get(id)?.isMusic) {
       return;
     }
- 
-    throw new Error("That YouTube video is not marked as Music, so it cannot be queued. Use a YouTube Music song link instead."); 
-  } 
- 
-  private isYouTubeTopicVideo(video: Awaited<ReturnType<typeof play.video_info>> | undefined) { 
-    const channelName = video?.video_details.channel?.name?.trim(); 
-    return Boolean(channelName && /(?:^|\s)-\s*Topic$/i.test(channelName)); 
-  } 
- 
-  private isYouTubeMusicUrl(url: string) { 
+
+    throw new Error("That YouTube video is not marked as Music, so it cannot be queued. Use a YouTube Music song link instead.");
+  }
+
+  private isYouTubeTopicVideo(video: Awaited<ReturnType<typeof play.video_info>> | undefined) {
+    const channelName = video?.video_details.channel?.name?.trim();
+    return Boolean(channelName && /(?:^|\s)-\s*Topic$/i.test(channelName));
+  }
+
+  private isYouTubeMusicUrl(url: string) {
     try {
       const parsed = new URL(url);
       const host = parsed.hostname.toLowerCase();
       return host === "music.youtube" || host.startsWith("music.youtube.");
+    } catch {
+      return false;
+    }
+  }
+
+  private isYouTubeShortShareUrl(url: string) {
+    try {
+      const parsed = new URL(url);
+      return parsed.hostname.toLowerCase() === "youtu.be" && Boolean(this.readYouTubeVideoId(url));
     } catch {
       return false;
     }
@@ -2576,7 +2647,7 @@ export class ProviderResolver {
     }
   }
 
-  private isLikelyNonSongYouTubeResult(title: string | undefined, artist: string | undefined) { 
+  private isLikelyNonSongYouTubeResult(title: string | undefined, artist: string | undefined) {
     return this.nonSongYouTubeResultPenalty(
       title?.toLowerCase() ?? "",
       artist?.toLowerCase() ?? "",
@@ -2604,8 +2675,8 @@ export class ProviderResolver {
   private isNonSongVariantRequested(value: string | undefined) {
     return /\b(?:reaction|reacts?|reacting|first\s+time\s+(?:hearing|listening|watching)|review|breakdown|analysis|commentary)\b/i.test(value ?? "");
   }
- 
-  private readFilenameFromUrl(url: string): string | undefined { 
+
+  private readFilenameFromUrl(url: string): string | undefined {
     try {
       const parsed = new URL(url);
       const encodedFilename = parsed.pathname.split("/").at(-1);
@@ -2647,8 +2718,11 @@ export class ProviderResolver {
         .map((item) => {
           const duration = this.parseYouTubeDuration(item.contentDetails?.duration);
           const details: YouTubeVideoDetails = {
-              durationInSeconds: duration,
-              isMusic: item.snippet?.categoryId === youtubeMusicCategoryId
+            durationInSeconds: duration,
+            isMusic: item.snippet?.categoryId === youtubeMusicCategoryId,
+            title: item.snippet?.title ? this.decodeEntities(item.snippet.title) : undefined,
+            artist: item.snippet?.channelTitle,
+            artwork: this.pickBestYouTubeThumbnail(item.snippet?.thumbnails)
           };
           return item.id
             ? [item.id, details] as const
@@ -2656,6 +2730,14 @@ export class ProviderResolver {
         })
         .filter((entry): entry is readonly [string, YouTubeVideoDetails] => entry !== null)
     );
+  }
+
+  private async fetchSingleYouTubeVideoDetails(videoId: string | undefined) {
+    if (!videoId) {
+      return undefined;
+    }
+
+    return (await this.fetchYouTubeVideoDetails([videoId])).get(videoId);
   }
 
   private parseYouTubeDuration(value: string | undefined): number | undefined {
@@ -2683,11 +2765,11 @@ export class ProviderResolver {
   private buildYouTubePlaybackUrl(url: string | undefined, id: string | undefined): string | undefined {
     const videoId = id ?? (url ? this.readYouTubeVideoId(url) : undefined);
     return videoId ? `https://music.youtube.com/watch?v=${videoId}` : url;
-  } 
- 
-  private searchCandidateLimit(limit: number) { 
-    return Math.min(Math.max(limit * 3, limit, 1), 25); 
-  } 
+  }
+
+  private searchCandidateLimit(limit: number) {
+    return Math.min(Math.max(limit * 3, limit, 1), 25);
+  }
 
   private handleSoundCloudSearchError(context: string, error: unknown) {
     if (this.isMissingSoundCloudClientError(error)) {

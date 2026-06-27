@@ -18,6 +18,11 @@ type StripeCheckoutSession = {
   metadata?: Record<string, string>;
 };
 
+type StripePortalSession = {
+  id: string;
+  url?: string | null;
+};
+
 type StripeSubscription = {
   id: string;
   customer?: string | null;
@@ -57,7 +62,8 @@ export class StripeBillingService {
       "line_items[0][price]": stripe.premiumPriceId,
       "line_items[0][quantity]": "1",
       "metadata[discordUserId]": userId,
-      "subscription_data[metadata][discordUserId]": userId
+      "subscription_data[metadata][discordUserId]": userId,
+      allow_promotion_codes: "true"
     });
 
     const session = await this.request<StripeCheckoutSession>("/checkout/sessions", {
@@ -67,6 +73,26 @@ export class StripeBillingService {
 
     if (!session.url) {
       throw new Error("Stripe did not return a checkout URL.");
+    }
+
+    return session.url;
+  }
+
+  static async createPremiumPortalSession(stripeCustomerId: string) {
+    this.requireStripeConfig();
+    const returnUrl = new URL("/?premium=manage", appConfig.dashboardPublicUrl);
+    const body = new URLSearchParams({
+      customer: stripeCustomerId,
+      return_url: returnUrl.toString()
+    });
+
+    const session = await this.request<StripePortalSession>("/billing_portal/sessions", {
+      method: "POST",
+      body
+    });
+
+    if (!session.url) {
+      throw new Error("Stripe did not return a billing portal URL.");
     }
 
     return session.url;
@@ -111,6 +137,15 @@ export class StripeBillingService {
       const userId = session.client_reference_id ?? session.metadata?.discordUserId;
       if (!userId || !session.subscription) {
         return null;
+      }
+
+      const subscription = await this.retrieveSubscription(session.subscription);
+      const sync = this.subscriptionToPremiumSync(subscription);
+      if (sync) {
+        return {
+          ...sync,
+          stripeCustomerId: sync.stripeCustomerId ?? session.customer ?? undefined
+        };
       }
 
       return {

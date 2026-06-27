@@ -70,9 +70,14 @@ export function createDashboardServer(getMusic: () => MusicManager | null) {
   });
 
   app.get("/api/players", withMusic((music, _request, response) => {
+    const players = music.listSnapshots().map((player) => ({
+      ...player,
+      intelligence: music.getGuildIntelligence(player.guildId)
+    }));
+
     response.json({
       publicUrl: appConfig.dashboardPublicUrl,
-      players: music.listSnapshots()
+      players
     });
   }));
 

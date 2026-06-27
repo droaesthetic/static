@@ -6,7 +6,8 @@ const template = document.getElementById("playerTemplate");
 const statusNode = document.getElementById("status");
 
 const storageKey = "dro-tunes-dashboard-token";
-const dashboardRefreshMs = 5000;
+const dashboardRefreshMs = 30000;
+const auditRefreshMs = 30000;
 const activeAuditGuilds = new Set();
 const activeVoiceHistoryGuilds = new Set();
 const auditRefreshTimers = new Map();
@@ -20,6 +21,8 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 let dashboardRefreshTimer = null;
 let isRefreshingPlayers = false;
 let queuedPlayersRefresh = false;
+let selectedGuildId = "";
+let latestPlayers = [];
 
 tokenInput.value = localStorage.getItem(storageKey) || "";
 
@@ -73,9 +76,11 @@ async function api(path, options = {}) {
 }
 
 function renderPlayers(players) {
+  latestPlayers = players;
   playersNode.replaceChildren();
 
   if (!players.length) {
+    selectedGuildId = "";
     const empty = document.createElement("p");
     empty.className = "empty";
     empty.textContent = "No servers are available yet. Use /play in Discord and refresh.";
@@ -86,15 +91,22 @@ function renderPlayers(players) {
 
   setStatus("Connected. Dashboard data loaded.", "is-success");
 
+  if (selectedGuildId && !players.some((player) => player.guildId === selectedGuildId)) {
+    selectedGuildId = "";
+  }
+
   for (const player of players) {
     const fragment = template.content.cloneNode(true);
     const card = fragment.querySelector(".player-card");
+    const serverRow = fragment.querySelector(".server-row");
+    const playerDetails = fragment.querySelector(".player-details");
     const guildName = fragment.querySelector(".guild-name");
     const statusLine = fragment.querySelector(".status-line");
     const volumePill = fragment.querySelector(".volume-pill");
     const serverMeta = fragment.querySelector(".server-meta");
     const nowPlaying = fragment.querySelector(".now-playing");
     const queue = fragment.querySelector(".queue");
+    const intelligenceGrid = fragment.querySelector(".intelligence-grid");
     const voiceHistory = fragment.querySelector(".voice-history");
     const voiceHistoryButton = fragment.querySelector("[data-toggle-voice-history]");
     const auditList = fragment.querySelector(".audit-log-list");
@@ -112,6 +124,16 @@ function renderPlayers(players) {
     statusLine.textContent = voiceLabel ? `${playbackStatus} in ${voiceLabel}` : playbackStatus;
     volumePill.textContent = `${player.volume}%`;
     slider.value = player.volume;
+
+    const isSelected = player.guildId === selectedGuildId;
+    card.classList.toggle("is-selected", isSelected);
+    serverRow.setAttribute("aria-expanded", String(isSelected));
+    playerDetails.hidden = !isSelected;
+
+    serverRow.addEventListener("click", () => {
+      selectedGuildId = isSelected ? "" : player.guildId;
+      renderPlayers(latestPlayers);
+    });
 
     renderServerMeta(serverMeta, player);
     syncVoiceHistoryPanel(player, voiceHistoryButton, voiceHistory);
@@ -136,6 +158,8 @@ function renderPlayers(players) {
     } else {
       queue.append(renderEmpty("Queue is empty."));
     }
+
+    renderIntelligence(intelligenceGrid, player.intelligence);
 
     for (const button of fragment.querySelectorAll("[data-action]")) {
       button.addEventListener("click", async () => {
@@ -178,6 +202,53 @@ function renderPlayers(players) {
 
     playersNode.append(card);
   }
+}
+
+function renderIntelligence(node, intelligence) {
+  node.replaceChildren();
+  if (!intelligence) {
+    node.append(renderEmpty("No intelligence data available yet."));
+    return;
+  }
+
+  node.append(
+    renderInsightCard(
+      "Queue suggestions",
+      intelligence.cleanupSuggestions?.length
+        ? intelligence.cleanupSuggestions.map((item) => item.detail)
+        : ["No cleanup suggestions right now."]
+    ),
+    renderInsightCard(
+      "Recent insights",
+      intelligence.insights?.length
+        ? intelligence.insights.map((item) => item.detail)
+        : ["Play, skip, and save songs to build recommendations."]
+    ),
+    renderInsightCard(
+      "Top artists",
+      intelligence.topArtists?.length
+        ? intelligence.topArtists.map((item) => `${item.name} (${item.count})`)
+        : ["No artist history yet."]
+    )
+  );
+}
+
+function renderInsightCard(title, lines) {
+  const card = document.createElement("div");
+  card.className = "insight-card";
+
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  card.append(heading);
+
+  const list = document.createElement("ul");
+  for (const line of lines.slice(0, 4)) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    list.append(item);
+  }
+  card.append(list);
+  return card;
 }
 
 function renderServerMeta(node, player) {
@@ -301,7 +372,7 @@ function startAuditRefresh(guildId, list) {
     }
 
     loadAuditLogs(guildId, list);
-  }, 5000);
+  }, auditRefreshMs);
   auditRefreshTimers.set(guildId, timer);
 }
 

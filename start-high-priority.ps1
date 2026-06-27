@@ -1,8 +1,12 @@
+param(
+  [switch]$SkipLavalink
+)
+
 $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
 
-$logPath = Join-Path $PSScriptRoot "start-local.log"
+$logPath = Join-Path $PSScriptRoot "start-high-priority.log"
 $transcriptStarted = $false
 
 try {
@@ -29,12 +33,29 @@ try {
     throw "No free port found between $StartPort and $EndPort."
   }
 
+  $nodePath = "C:\Program Files\nodejs\node.exe"
+  if (-not (Test-Path $nodePath)) {
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+      throw "Node.js was not found. Install Node.js 22+ or add node.exe to PATH."
+    }
+
+    $nodePath = $nodeCommand.Source
+  }
+
+  $tsxPath = Join-Path $PSScriptRoot "node_modules\tsx\dist\cli.mjs"
+  if (-not (Test-Path $tsxPath)) {
+    throw "Missing tsx dependency. Run npm install before starting the bot."
+  }
+
   $port = Get-NextFreePort
   $env:DASHBOARD_PORT = "$port"
   $env:DASHBOARD_PUBLIC_URL = "http://localhost:$port"
 
   $ensureLavalinkScript = Join-Path $PSScriptRoot "lavalink\ensure-lavalink.ps1"
-  if (Test-Path $ensureLavalinkScript) {
+  if ($SkipLavalink) {
+    Write-Host "Lavalink auto-start skipped for this launcher." -ForegroundColor Yellow
+  } elseif (Test-Path $ensureLavalinkScript) {
     Write-Host "Ensuring local Lavalink is running with high priority..." -ForegroundColor Cyan
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ensureLavalinkScript
     if ($LASTEXITCODE -ne 0) {
@@ -44,7 +65,7 @@ try {
     Write-Host "Lavalink auto-start skipped because lavalink\ensure-lavalink.ps1 is missing." -ForegroundColor Yellow
   }
 
-  Write-Host "Starting Static locally..." -ForegroundColor Green
+  Write-Host "Starting Static locally with high-priority Node.js..." -ForegroundColor Green
   Write-Host "Dashboard: http://localhost:$port" -ForegroundColor Cyan
   Write-Host "Startup log: $logPath" -ForegroundColor DarkGray
 
@@ -52,21 +73,26 @@ try {
   $botRestartExitCode = 42
 
   while ($true) {
-    & "C:\Program Files\nodejs\npm.cmd" run dev:local
-    $exitCode = $LASTEXITCODE
+    $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processInfo.FileName = $nodePath
+    $processInfo.Arguments = "`"$tsxPath`" `"src\index.ts`""
+    $processInfo.WorkingDirectory = $PSScriptRoot
+    $processInfo.UseShellExecute = $false
+
+    foreach ($entry in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+      $processInfo.Environment[$entry.Key] = "$($entry.Value)"
+    }
+
+    $process = [System.Diagnostics.Process]::Start($processInfo)
+    $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+
+    Write-Host "Node.js process $($process.Id) is running with priority: $($process.PriorityClass)" -ForegroundColor Cyan
+
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
 
     if ($exitCode -eq $botRestartExitCode) {
-      $highPriorityLauncher = Join-Path $PSScriptRoot "start-high-priority.ps1"
-      if (Test-Path $highPriorityLauncher) {
-        Write-Host "Bot requested a reboot. Relaunching with the high-priority Node.js launcher..." -ForegroundColor Yellow
-        Start-Sleep -Seconds $restartDelaySeconds
-        Start-Process `
-          -FilePath "powershell.exe" `
-          -ArgumentList @("-ExecutionPolicy", "Bypass", "-File", "`"$highPriorityLauncher`"") `
-          -WorkingDirectory $PSScriptRoot
-        break
-      }
-
       Write-Host "Bot requested a reboot. Restarting in $restartDelaySeconds seconds..." -ForegroundColor Yellow
       Start-Sleep -Seconds $restartDelaySeconds
       continue

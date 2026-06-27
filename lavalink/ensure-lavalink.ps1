@@ -3,7 +3,6 @@ Set-Location $PSScriptRoot
 
 $jarPath = Join-Path $PSScriptRoot "Lavalink.jar"
 $startScript = Join-Path $PSScriptRoot "start-lavalink.ps1"
-$logsDir = Join-Path $PSScriptRoot "logs"
 
 function Get-ConfiguredLavalinkPort {
   $rootEnv = Join-Path (Split-Path $PSScriptRoot -Parent) ".env"
@@ -46,20 +45,16 @@ function Get-LavalinkProcesses($port) {
     Sort-Object ProcessId -Unique
 }
 
-function Wait-ForLavalinkPortToClose($port) {
-  $deadline = (Get-Date).AddSeconds(25)
-  do {
-    $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    if (-not $listener) {
-      return
+function Set-LavalinkHighPriority($processes) {
+  foreach ($process in $processes) {
+    try {
+      $runtimeProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
+      $runtimeProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+      Write-Output "Lavalink process $($runtimeProcess.Id) priority: $($runtimeProcess.PriorityClass)"
+    } catch {
+      Write-Output "Could not set Lavalink process $($process.ProcessId) priority: $($_.Exception.Message)"
     }
-
-    Start-Sleep -Milliseconds 500
-  } while ((Get-Date) -lt $deadline)
-
-  $owners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique
-  throw "Port $port is still in use by process id(s): $($owners -join ', ')."
+  }
 }
 
 function Wait-ForLavalinkPortToOpen($port, $startedProcess) {
@@ -81,18 +76,6 @@ function Wait-ForLavalinkPortToOpen($port, $startedProcess) {
   throw "Lavalink did not start listening on port $port within 90 seconds."
 }
 
-function Set-LavalinkHighPriority($processes) {
-  foreach ($process in $processes) {
-    try {
-      $runtimeProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
-      $runtimeProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
-      Write-Output "Lavalink process $($runtimeProcess.Id) priority: $($runtimeProcess.PriorityClass)"
-    } catch {
-      Write-Output "Could not set Lavalink process $($process.ProcessId) priority: $($_.Exception.Message)"
-    }
-  }
-}
-
 if (-not (Test-Path $jarPath)) {
   Write-Error "Lavalink.jar is missing. Run .\download-lavalink.ps1 first."
 }
@@ -101,19 +84,14 @@ if (-not (Test-Path $startScript)) {
   Write-Error "start-lavalink.ps1 is missing."
 }
 
-if (-not (Test-Path $logsDir)) {
-  New-Item -ItemType Directory -Path $logsDir | Out-Null
-}
-
 $port = Get-ConfiguredLavalinkPort
 $lavalinkProcesses = Get-LavalinkProcesses $port
 
-foreach ($process in $lavalinkProcesses) {
-  Write-Output "Stopping Lavalink process $($process.ProcessId)..."
-  Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+if ($lavalinkProcesses.Count -gt 0) {
+  Write-Output "Lavalink is already running on port $port."
+  Set-LavalinkHighPriority $lavalinkProcesses
+  exit 0
 }
-
-Wait-ForLavalinkPortToClose $port
 
 $argumentList = @(
   "-NoExit",

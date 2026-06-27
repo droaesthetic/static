@@ -40,14 +40,14 @@ lavalink:
       channelMix: true
       lowPass: true
     nonAllocatingFrameBuffer: true
-    bufferDurationMs: 12000
-    frameBufferDurationMs: 45000
+    bufferDurationMs: 1000
+    frameBufferDurationMs: 5000
     opusEncodingQuality: 4
     resamplingQuality: MEDIUM
     trackStuckThresholdMs: 45000
-    useSeekGhosting: true
+    useSeekGhosting: false
     youtubePlaylistLoadLimit: 50
-    playerUpdateInterval: 5
+    playerUpdateInterval: 1
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
     soundcloudFilterOutPreviewTracks: false

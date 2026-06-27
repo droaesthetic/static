@@ -127,8 +127,7 @@ button {
   box-shadow: var(--shadow);
 }
 
-.panel-head,
-.card-top {
+.panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -142,10 +141,43 @@ button {
 }
 
 .player-card {
-  padding: 20px;
-  border-radius: 22px;
+  overflow: hidden;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line);
+}
+
+.player-card.is-selected {
+  border-color: rgba(126, 247, 201, 0.38);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.server-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.server-row:hover,
+.server-row:focus-visible {
+  background: rgba(255, 255, 255, 0.055);
+  outline: none;
+}
+
+.server-row[aria-expanded="true"] {
+  background: rgba(126, 247, 201, 0.08);
+}
+
+.player-details {
+  padding: 0 18px 18px;
+  border-top: 1px solid var(--line);
 }
 
 .guild-name {
@@ -274,6 +306,35 @@ button {
   background: rgba(255, 255, 255, 0.025);
 }
 
+.intelligence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.insight-card {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.insight-card strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.insight-card ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 24px, 100%);
@@ -289,6 +350,10 @@ button {
   .queue-item {
     grid-template-columns: 1fr;
     padding-left: 18px;
+  }
+
+  .intelligence-grid {
+    grid-template-columns: 1fr;
   }
 
   .queue-label {

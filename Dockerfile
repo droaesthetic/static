@@ -15,7 +15,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends openjdk-17-jre-headless \
+  && apt-get install -y --no-install-recommends ca-certificates curl openjdk-17-jre-headless \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
@@ -27,6 +27,7 @@ COPY lavalink ./lavalink
 COPY render-start.sh ./render-start.sh
 
 RUN mkdir -p /app/data /app/lavalink/logs /app/lavalink/plugins \
+  && curl -fsSL https://github.com/lavalink-devs/Lavalink/releases/download/4.2.2/Lavalink.jar -o /app/lavalink/Lavalink.jar \
   && chmod +x /app/render-start.sh
 
 EXPOSE 3000

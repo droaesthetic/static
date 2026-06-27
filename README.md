@@ -268,11 +268,11 @@ Use this when you want the dashboard and bot process on a normal Render service:
    - `LAVALINK_URL`
    - `LAVALINK_PASSWORD`
 4. Point `DASHBOARD_PUBLIC_URL` at the Render service URL, for example `https://your-service.onrender.com`.
-5. Make sure `LAVALINK_URL` points to a separate Lavalink server you control.
+5. Make sure `LAVALINK_URL` points to a separate Lavalink server you control if you are using Render's free tier.
 
-Render's free web service tier is only `512 MB` RAM and `0.1 CPU`, so it is too small for the full bot plus Lavalink stack as an always-on setup. It can still be useful for the dashboard or for testing, but for a real 24/7 bot you will usually want a paid Render service or another host for Lavalink.
+If you want to run the full bot plus Lavalink in one container, Render's free web service tier is only `512 MB` RAM and `0.1 CPU`, so it is too small for that all-in-one setup. In that case, use a paid Render service or move Lavalink to another host.
 
-The `render.yaml` file in this repo is the blueprint for that setup.
+The `render.yaml` file in this repo defaults to `RUN_LOCAL_LAVALINK=false` so the free tier can host the bot against an external Lavalink server. Set it to `true` only if you upgrade to a bigger Render instance and want the container to start Lavalink itself.
 
 ## Oracle Cloud Always Free Hosting
 

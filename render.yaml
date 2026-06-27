@@ -18,6 +18,12 @@ services:
         sync: false
       - key: DASHBOARD_PUBLIC_URL
         sync: false
+      - key: RUN_LOCAL_LAVALINK
+        value: "false"
+      - key: LAVALINK_URL
+        sync: false
+      - key: LAVALINK_PASSWORD
+        sync: false
       - key: BOT_OWNERS
         sync: false
       - key: BOT_MANAGERS

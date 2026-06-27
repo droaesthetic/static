@@ -57,7 +57,20 @@ const schema = z.object({
   PRE_RESOLVE_NEXT_TRACK: booleanFromEnv.default(true)
 });
 
-const parsed = schema.parse(process.env);
+const result = schema.safeParse(process.env);
+
+if (!result.success) {
+  console.error(
+    "Invalid environment configuration:\n"
+      + result.error.issues.map((issue) => {
+        const path = issue.path.join(".") || "(root)";
+        return `- ${path}: ${issue.message}`;
+      }).join("\n")
+  );
+  process.exit(1);
+}
+
+const parsed = result.data;
 
 export const appConfig = {
   discordToken: parsed.DISCORD_TOKEN,

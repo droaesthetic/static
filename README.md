@@ -115,7 +115,7 @@ This only unlocks solo session for that user. It does not grant premium prefix, 
 - `/removelast`
 - `/removeduplicates`
 - `/removeabsent`
-- `/massremove start:<position> count:<count>`
+- `/massremove songs:<songs>`
 - `/previous`
 - `/skip`
 - `/skip to:<position>`
@@ -174,13 +174,13 @@ Once you set a prefix with `/prefix set`, every top-level slash command also sup
 - `<prefix>removelast`
 - `<prefix>removeduplicates`
 - `<prefix>removeabsent`
-- `<prefix>massremove <start> <count>`
+- `<prefix>massremove <songs>`
 - `<prefix>previous`
 - `<prefix>fastforward <seconds>`
 - `<prefix>rewind <seconds>`
 - `<prefix>autoplay <on|off>`
 - `<prefix>voteskip [on|off]`
-- `<prefix>filter <off|bassboost|nightcore|vaporwave|karaoke|trebleboost|8d>`
+- `<prefix>filter <off|enhanced|bassboost|nightcore|vaporwave|karaoke|trebleboost|8d>`
 - `<prefix>subscribe`
 - `<prefix>premium subscribe`
 - `<prefix>premium prefix [value|clear]`
@@ -269,6 +269,7 @@ Use this when you want the dashboard and bot process on a normal Render service:
    - `LAVALINK_PASSWORD`
 4. Point `DASHBOARD_PUBLIC_URL` at the Render service URL, for example `https://your-service.onrender.com`.
 5. Make sure `LAVALINK_URL` points to a separate Lavalink server you control if you are using Render's free tier.
+6. Keep `RUN_LOCAL_LAVALINK=false` so Render does not try to launch Lavalink inside the web service.
 
 If you want to run the full bot plus Lavalink in one container, Render's free web service tier is only `512 MB` RAM and `0.1 CPU`, so it is too small for that all-in-one setup. In that case, use a paid Render service or move Lavalink to another host.
 
@@ -407,8 +408,8 @@ This keeps playback responsive while reducing idle voice time, dashboard polling
 For smoother playback on a local PC, the bundled Lavalink config keeps a larger audio buffer:
 
 ```yml
-bufferDurationMs: 1000
-frameBufferDurationMs: 5000
+bufferDurationMs: 2000
+frameBufferDurationMs: 10000
 playerUpdateInterval: 1
 useSeekGhosting: false
 trackStuckThresholdMs: 30000

@@ -125,6 +125,7 @@ export class GuildPlayer {
   private stagnantWatchdogTicks = 0;
   private nowPlayingMessageId?: string;
   private nowPlayingMessageChannelId?: string;
+  private stickyTimer?: ReturnType<typeof setTimeout>;
   private queueEmptyMessageId?: string;
   private queueEmptyMessageChannelId?: string;
   private playbackFailureTimestamps: number[] = [];
@@ -286,6 +287,10 @@ export class GuildPlayer {
     }
 
     const disconnectFromVoice = options?.disconnectFromVoice ?? true;
+    if (this.stickyTimer) {
+      clearTimeout(this.stickyTimer);
+      this.stickyTimer = undefined;
+    }
     this.clearPlaybackFailures();
     this.queue.length = 0;
     this.current = undefined;
@@ -568,16 +573,25 @@ export class GuildPlayer {
     });
   }
 
-  async massRemove(start: number, count: number) {
+  async massRemove(upcomingIndices: number[]) {
     return this.runExclusive(async () => {
-      if (start < 1 || count < 1) {
-        throw new Error("Start and count must both be at least 1.");
+      const sortedIndices = Array.from(new Set(upcomingIndices)).sort((a, b) => b - a);
+
+      let removedCount = 0;
+      for (const index of sortedIndices) {
+        if (index < 1 || index > this.queue.length) {
+          continue;
+        }
+        this.queue.splice(index - 1, 1);
+        removedCount++;
       }
 
-      const removed = this.queue.splice(start - 1, count);
-      await this.persist();
-      this.scheduleNextTrackWarmup();
-      return removed.length;
+      if (removedCount > 0) {
+        await this.persist();
+        this.scheduleNextTrackWarmup();
+      }
+
+      return removedCount;
     });
   }
 
@@ -601,6 +615,20 @@ export class GuildPlayer {
       this.queue.length = 0;
       await this.persist();
       this.scheduleNextTrackWarmup();
+      return count;
+    });
+  }
+
+  async clearUserQueue(userId: string) {
+    return this.runExclusive(async () => {
+      const before = this.queue.length;
+      const filtered = this.queue.filter((track) => track.requestedById !== userId);
+      this.queue.splice(0, this.queue.length, ...filtered);
+      const count = before - filtered.length;
+      if (count > 0) {
+        await this.persist();
+        this.scheduleNextTrackWarmup();
+      }
       return count;
     });
   }
@@ -1488,7 +1516,38 @@ export class GuildPlayer {
       .catch(() => undefined);
   }
 
+  getCurrentTrack() {
+    return this.current;
+  }
+
+  getNowPlayingMessageId() {
+    return this.nowPlayingMessageId;
+  }
+
+  getNowPlayingMessageChannelId() {
+    return this.nowPlayingMessageChannelId;
+  }
+
+  triggerStickyNPUpdate() {
+    if (this.stickyTimer) {
+      clearTimeout(this.stickyTimer);
+    }
+    this.stickyTimer = setTimeout(async () => {
+      try {
+        if (this.current) {
+          await this.sendNowPlayingMessage(this.current);
+        }
+      } catch (error) {
+        console.error(`[sticky] Failed to update now playing message:`, error);
+      }
+    }, 1500);
+  }
+
   private async deleteNowPlayingMessage(channel?: Awaited<ReturnType<GuildPlayer["getAnnouncementChannel"]>>) {
+    if (this.stickyTimer) {
+      clearTimeout(this.stickyTimer);
+      this.stickyTimer = undefined;
+    }
     await this.deleteTrackedMessage("nowPlayingMessageId", channel);
   }
 

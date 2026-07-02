@@ -3,7 +3,12 @@ set -eu
 
 LAVALINK_PORT="${LAVALINK_PORT:-2333}"
 
-export LAVALINK_URL="127.0.0.1:${LAVALINK_PORT}"
+if [ "${RUN_LOCAL_LAVALINK:-false}" = "true" ]; then
+  export LAVALINK_URL="${LAVALINK_URL:-127.0.0.1:${LAVALINK_PORT}}"
+else
+  : "${LAVALINK_URL:?Set LAVALINK_URL to your external Lavalink server when RUN_LOCAL_LAVALINK=false}"
+fi
+
 export LAVALINK_PASSWORD="${LAVALINK_PASSWORD:-droTunesLocalLava2026!}"
 export LAVALINK_SECURE="${LAVALINK_SECURE:-false}"
 export LAVALINK_SERVER_PASSWORD="${LAVALINK_PASSWORD}"

@@ -54,6 +54,9 @@ export interface GuildSettings {
   autoDeleteBotResponses: boolean;
   maxSongLengthSeconds?: number;
   maxPlaylistLength?: number;
+  clearProtectionDisabled?: boolean;
+  stopProtectionDisabled?: boolean;
+  disconnectProtectionDisabled?: boolean;
 }
 
 export interface SearchResult {

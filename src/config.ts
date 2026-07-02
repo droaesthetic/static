@@ -54,7 +54,8 @@ const schema = z.object({
   PLAYBACK_WATCHDOG_INTERVAL_SECONDS: z.coerce.number().min(5).max(120).optional(),
   STALE_PLAYER_UPDATE_SECONDS: z.coerce.number().min(15).max(300).optional(),
   NOW_PLAYING_THUMBNAILS: booleanFromEnv.optional(),
-  PRE_RESOLVE_NEXT_TRACK: booleanFromEnv.default(true)
+  PRE_RESOLVE_NEXT_TRACK: booleanFromEnv.default(true),
+  STICKY_NOW_PLAYING: booleanFromEnv.default(false)
 });
 
 const result = schema.safeParse(process.env);
@@ -117,5 +118,6 @@ export const appConfig = {
     ?? (parsed.LOW_BANDWIDTH_MODE ? 45 : 30),
   nowPlayingThumbnails: parsed.NOW_PLAYING_THUMBNAILS
     ?? !parsed.LOW_BANDWIDTH_MODE,
-  preResolveNextTrack: parsed.PRE_RESOLVE_NEXT_TRACK
+  preResolveNextTrack: parsed.PRE_RESOLVE_NEXT_TRACK,
+  stickyNowPlaying: parsed.STICKY_NOW_PLAYING
 };

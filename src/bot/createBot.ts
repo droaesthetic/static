@@ -300,6 +300,42 @@ function describeQueueDisplayPositionStatus(status: QueueDisplayEntry["status"])
   return status === "Now" ? "the currently playing track" : "an already-played track";
 }
 
+function parseMassRemoveInput(input: string): number[] {
+  const parts = input.split(",");
+  const displayPositions: number[] = [];
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes("-")) {
+      if (!/^\d+\s*-\s*\d+$/.test(trimmed)) {
+        throw new Error(`Invalid range format: "${trimmed}"`);
+      }
+      const rangeParts = trimmed.split("-");
+      const start = Number.parseInt(rangeParts[0].trim(), 10);
+      const end = Number.parseInt(rangeParts[1].trim(), 10);
+      if (start === 0 || end === 0) {
+        throw new Error("Queue numbers must be greater than 0.");
+      }
+      if (start > end) {
+        throw new Error(`Invalid range "${trimmed}": start number must be less than or equal to end number.`);
+      }
+      for (let i = start; i <= end; i++) {
+        displayPositions.push(i);
+      }
+    } else {
+      if (!/^\d+$/.test(trimmed)) {
+        throw new Error(`Invalid number format: "${trimmed}"`);
+      }
+      const num = Number.parseInt(trimmed, 10);
+      if (num === 0) {
+        throw new Error("Queue numbers must be greater than 0.");
+      }
+      displayPositions.push(num);
+    }
+  }
+  return Array.from(new Set(displayPositions)).sort((a, b) => a - b);
+}
+
 function resolveUpcomingQueuePosition(
   snapshot: ReturnType<MusicManager["getSnapshot"]>,
   displayPosition: number,
@@ -1022,7 +1058,7 @@ function formatCommandCheatSheet(prefixes: string[]) {
     formatHelpCommand(`/removelast`, `${prefix}removelast`),
     formatHelpCommand(`/removeduplicates`, `${prefix}removeduplicates`),
     formatHelpCommand(`/removeabsent`, `${prefix}removeabsent`),
-    formatHelpCommand(`/massremove <start> <count>`, `${prefix}massremove [#] <count>`),
+    formatHelpCommand(`/massremove <songs>`, `${prefix}massremove 9, 17, 24`),
     formatHelpCommand(`/shuffle`, `${prefix}shuffle`),
     formatHelpCommand(`/removeafterplayed`, `${prefix}removeafterplayed on/off`),
     "",
@@ -1473,6 +1509,9 @@ function formatModerationSummary(music: MusicManager, guildId: string) {
     `**Auto-delete:** ${settings.autoDeleteBotResponses ? "on" : "off"}`,
     `**Max song length:** ${settings.maxSongLengthSeconds ? `${settings.maxSongLengthSeconds}s` : "off"}`,
     `**Max shock-list length:** ${settings.maxPlaylistLength ? `${settings.maxPlaylistLength} tracks` : "off"}`,
+    `**Clear protection:** ${settings.clearProtectionDisabled ? "disabled" : "enabled"}`,
+    `**Stop protection:** ${settings.stopProtectionDisabled ? "disabled" : "enabled"}`,
+    `**Disconnect protection:** ${settings.disconnectProtectionDisabled ? "disabled" : "enabled"}`,
     "",
     formatSectionHeading("CHANNEL OVERRIDES"),
     channelLines,
@@ -2261,7 +2300,22 @@ export async function createBot() {
   });
 
   client.on(Events.MessageCreate, async (message) => {
-    if (!message.guild || message.author.bot) {
+    if (!message.guild) {
+      return;
+    }
+
+    if (appConfig.stickyNowPlaying) {
+      const player = music.getPlayer(message.guild.id);
+      if (player && player.getCurrentTrack()) {
+        const npChannelId = player.getNowPlayingMessageChannelId();
+        const npMessageId = player.getNowPlayingMessageId();
+        if (message.channelId === npChannelId && message.id !== npMessageId) {
+          player.triggerStickyNPUpdate();
+        }
+      }
+    }
+
+    if (message.author.bot) {
       return;
     }
 
@@ -2533,20 +2587,39 @@ export async function createBot() {
           await replyAndAutoDelete(message, `Joined **${voiceChannel.name}**.`);
           return;
         }
-        case "stop": 
-          await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id); 
+
+        case "stop": {
+          const member = await message.guild.members.fetch(message.author.id);
+          await music.assertCanControl(member, message.guild.id);
+          if (await music.shouldProtectQueue(message.guild.id, member, "stop")) {
+            throw new Error("Cannot stop playback because other members still have songs in the queue and are in the voice channel.");
+          }
           await replyAndAutoDelete(message, formatStopResult(await music.stop(message.guild.id))); 
-          return; 
-        case "disconnect":
-          await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id);
+          return;
+        }
+        case "disconnect": {
+          const member = await message.guild.members.fetch(message.author.id);
+          await music.assertCanControl(member, message.guild.id);
+          if (await music.shouldProtectQueue(message.guild.id, member, "disconnect")) {
+            throw new Error("Cannot disconnect from voice because other members still have songs in the queue and are in the voice channel.");
+          }
           await music.disconnect(message.guild.id);
           await replyAndAutoDelete(message, "Disconnected from voice.");
           return;
-        case "clear":
-          await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id);
-          await music.clearQueue(message.guild.id);
-          await replyAndAutoDelete(message, "Queue cleared.");
+        }
+        case "clear": {
+          const member = await message.guild.members.fetch(message.author.id);
+          await music.assertCanControl(member, message.guild.id);
+          if (await music.shouldProtectQueue(message.guild.id, member, "clear")) {
+            const clearedCount = await music.clearUserQueue(message.guild.id, member.id);
+            await replyAndAutoDelete(message, `Cleared ${clearedCount} of your songs from the queue (leaving other members' songs).`);
+          } else {
+            await music.clearQueue(message.guild.id);
+            await replyAndAutoDelete(message, "Queue cleared.");
+          }
           return;
+        }
+
         case "volume": {
           await ensureModeratorGuildMember(await message.guild.members.fetch(message.author.id), music);
           const percent = Number.parseInt(rest[0] ?? "", 10);
@@ -2590,14 +2663,23 @@ export async function createBot() {
         }
         case "massremove": {
           await music.assertCanControl(await message.guild.members.fetch(message.author.id), message.guild.id);
-          const start = Number.parseInt(rest[0] ?? "", 10);
-          const count = Number.parseInt(rest[1] ?? "", 10);
-          if (!Number.isInteger(start) || !Number.isInteger(count)) {
-            throw new Error("Use `massremove <start> <count>`.");
+          const inputStr = rest.join(" ");
+          if (!inputStr.trim()) {
+            throw new Error("Use `massremove <songs>` (e.g., `massremove 9, 17, 24` or `massremove 4-8`).");
+          }
+          const displayPositions = parseMassRemoveInput(inputStr);
+          if (displayPositions.length === 0) {
+            throw new Error("No valid track positions specified.");
           }
 
-          const queuePosition = resolveUpcomingQueuePosition(music.getSnapshot(message.guild.id), start, "start position");
-          const removedCount = await music.massRemove(message.guild.id, queuePosition, count);
+          const snapshot = music.getSnapshot(message.guild.id);
+          const upcomingIndices: number[] = [];
+          for (const pos of displayPositions) {
+            const upcomingIndex = resolveUpcomingQueuePosition(snapshot, pos, `queue position ${pos}`);
+            upcomingIndices.push(upcomingIndex);
+          }
+
+          const removedCount = await music.massRemove(message.guild.id, upcomingIndices);
           await replyAndAutoDelete(message, `Removed ${removedCount} track${removedCount === 1 ? "" : "s"} from the queue.`);
           return;
         }
@@ -2998,25 +3080,39 @@ async function handleSlashCommand(
       await replyToInteraction(interaction, "Playback resumed.", "Playback Updated");
       return;
 
-    case "stop": 
-      if (!guildId) throw new Error("This command must be used in a server."); 
-      await ensureControlAccess(interaction, music); 
-      await replyToInteraction(interaction, formatStopResult(await music.stop(guildId)), "Playback Updated"); 
-      return; 
-
-    case "disconnect":
+    case "stop": {
       if (!guildId) throw new Error("This command must be used in a server.");
-      await ensureControlAccess(interaction, music);
+      const member = await ensureControlAccess(interaction, music);
+      if (await music.shouldProtectQueue(guildId, member, "stop")) {
+        throw new Error("Cannot stop playback because other members still have songs in the queue and are in the voice channel.");
+      }
+      await replyToInteraction(interaction, formatStopResult(await music.stop(guildId)), "Playback Updated");
+      return;
+    }
+
+    case "disconnect": {
+      if (!guildId) throw new Error("This command must be used in a server.");
+      const member = await ensureControlAccess(interaction, music);
+      if (await music.shouldProtectQueue(guildId, member, "disconnect")) {
+        throw new Error("Cannot disconnect from voice because other members still have songs in the queue and are in the voice channel.");
+      }
       await music.disconnect(guildId);
       await replyToInteraction(interaction, "Disconnected from voice.", "Voice Disconnected");
       return;
+    }
 
-    case "clear":
+    case "clear": {
       if (!guildId) throw new Error("This command must be used in a server.");
-      await ensureControlAccess(interaction, music);
-      await music.clearQueue(guildId);
-      await replyToInteraction(interaction, "Queue cleared.", "Queue Updated");
+      const member = await ensureControlAccess(interaction, music);
+      if (await music.shouldProtectQueue(guildId, member, "clear")) {
+        const clearedCount = await music.clearUserQueue(guildId, member.id);
+        await replyToInteraction(interaction, `Cleared ${clearedCount} of your songs from the queue (leaving other members' songs).`, "Queue Updated");
+      } else {
+        await music.clearQueue(guildId);
+        await replyToInteraction(interaction, "Queue cleared.", "Queue Updated");
+      }
       return;
+    }
 
     case "queue":
       if (!guildId) throw new Error("This command must be used in a server.");
@@ -3178,7 +3274,15 @@ async function handleSlashCommand(
       await replyToInteraction(
         interaction,
         {
-          content: `Premium is **$3.99/month**. Start or manage your subscription here: ${billingUrl}`,
+          content: "Get the best experience with our Premium bot! Enjoy cool filters, solo sessions, 24/7 vc, and more exclusive benefits made just for you!",
+          components: [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setLabel("Upgrade Now")
+                .setStyle(ButtonStyle.Link)
+                .setURL(billingUrl)
+            )
+          ],
           ephemeral: true
         },
         "Premium"
@@ -3270,17 +3374,26 @@ async function handleSlashCommand(
       await replyToInteraction(interaction, `Removed ${absentCount} queue entries from absent users.`, "Queue Updated");
       return;
 
-    case "massremove":
+    case "massremove": {
       if (!guildId) throw new Error("This command must be used in a server.");
       await ensureControlAccess(interaction, music);
-      const start = interaction.options.getInteger("start", true);
-      const removedCount = await music.massRemove(
-        guildId,
-        resolveUpcomingQueuePosition(music.getSnapshot(guildId), start, "start position"),
-        interaction.options.getInteger("count", true)
-      );
+      const songsInput = interaction.options.getString("songs", true);
+      const displayPositions = parseMassRemoveInput(songsInput);
+      if (displayPositions.length === 0) {
+        throw new Error("No valid track positions specified.");
+      }
+
+      const snapshot = music.getSnapshot(guildId);
+      const upcomingIndices: number[] = [];
+      for (const pos of displayPositions) {
+        const upcomingIndex = resolveUpcomingQueuePosition(snapshot, pos, `queue position ${pos}`);
+        upcomingIndices.push(upcomingIndex);
+      }
+
+      const removedCount = await music.massRemove(guildId, upcomingIndices);
       await replyToInteraction(interaction, `Removed ${removedCount} track${removedCount === 1 ? "" : "s"} from the queue.`, "Queue Updated");
       return;
+    }
 
     case "shuffle":
       if (!guildId) throw new Error("This command must be used in a server.");
@@ -3897,6 +4010,45 @@ async function handlePrefixModerationCommand(message: Message, music: MusicManag
       );
       return;
     }
+
+    case "clearprotection": {
+      const enabled = parseToggleValue(args[1]);
+      if (enabled === undefined) {
+        throw new Error("Use `moderation clearprotection <on|off>`.");
+      }
+
+      await music.updateGuildSettings(guildId, {
+        clearProtectionDisabled: !enabled
+      });
+      await replyAndAutoDelete(message, `Clear protection is now ${enabled ? "enabled" : "disabled"}.`);
+      return;
+    }
+
+    case "stopprotection": {
+      const enabled = parseToggleValue(args[1]);
+      if (enabled === undefined) {
+        throw new Error("Use `moderation stopprotection <on|off>`.");
+      }
+
+      await music.updateGuildSettings(guildId, {
+        stopProtectionDisabled: !enabled
+      });
+      await replyAndAutoDelete(message, `Stop protection is now ${enabled ? "enabled" : "disabled"}.`);
+      return;
+    }
+
+    case "disconnectprotection": {
+      const enabled = parseToggleValue(args[1]);
+      if (enabled === undefined) {
+        throw new Error("Use `moderation disconnectprotection <on|off>`.");
+      }
+
+      await music.updateGuildSettings(guildId, {
+        disconnectProtectionDisabled: !enabled
+      });
+      await replyAndAutoDelete(message, `Disconnect protection is now ${enabled ? "enabled" : "disabled"}.`);
+      return;
+    }
   }
 
   throw new Error("Unknown moderation subcommand.");
@@ -4107,6 +4259,45 @@ async function handleModerationCommand(interaction: ChatInputCommandInteraction,
         tracks > 0
           ? `Maximum shock-list length set to ${tracks} tracks.`
           : "Maximum shock-list length limit cleared.",
+        "Moderation Updated"
+      );
+      return;
+    }
+
+    case "clearprotection": {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      await music.updateGuildSettings(guildId, {
+        clearProtectionDisabled: !enabled
+      });
+      await replyToInteraction(
+        interaction,
+        `Clear protection is now ${enabled ? "enabled" : "disabled"}.`,
+        "Moderation Updated"
+      );
+      return;
+    }
+
+    case "stopprotection": {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      await music.updateGuildSettings(guildId, {
+        stopProtectionDisabled: !enabled
+      });
+      await replyToInteraction(
+        interaction,
+        `Stop protection is now ${enabled ? "enabled" : "disabled"}.`,
+        "Moderation Updated"
+      );
+      return;
+    }
+
+    case "disconnectprotection": {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      await music.updateGuildSettings(guildId, {
+        disconnectProtectionDisabled: !enabled
+      });
+      await replyToInteraction(
+        interaction,
+        `Disconnect protection is now ${enabled ? "enabled" : "disabled"}.`,
         "Moderation Updated"
       );
       return;

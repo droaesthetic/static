@@ -79,6 +79,9 @@ plugins:
       refreshToken: "${YOUTUBE_OAUTH_REFRESH_TOKEN:}"
       # Keep startup non-interactive unless YOUTUBE_OAUTH_SKIP_INITIALIZATION=false.
       skipInitialization: ${YOUTUBE_OAUTH_SKIP_INITIALIZATION:true}
+    pot:
+      token: "${YOUTUBE_POT_TOKEN:}"
+      visitorData: "${YOUTUBE_POT_VISITORDATA:}"
 
   lavasrc:
     providers:

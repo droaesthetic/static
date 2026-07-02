@@ -170,12 +170,11 @@ const commands = [
   new SlashCommandBuilder().setName("removeabsent").setDescription("Remove queued tracks from users no longer in voice."),
   new SlashCommandBuilder()
     .setName("massremove")
-    .setDescription("Remove a block of tracks from the queue.")
-    .addIntegerOption((option) =>
-      option.setName("start").setDescription("First /queue display position to remove").setRequired(true).setMinValue(1)
-    )
-    .addIntegerOption((option) =>
-      option.setName("count").setDescription("How many tracks to remove").setRequired(true).setMinValue(1)
+    .setDescription("Remove multiple tracks from the queue.")
+    .addStringOption((option) =>
+      option.setName("songs")
+        .setDescription("Queue numbers separated by commas or ranges with dashes (e.g. 9, 17, 24 or 4-8)")
+        .setRequired(true)
     ),
   new SlashCommandBuilder().setName("shuffle").setDescription("Shuffle the upcoming queue."),
   new SlashCommandBuilder().setName("previous").setDescription("Play the previous track again."),
@@ -508,6 +507,30 @@ const commands = [
         .setDescription("Set the maximum allowed shock-list size in tracks. Use 0 to clear.")
         .addIntegerOption((option) =>
           option.setName("tracks").setDescription("Maximum tracks per shock-list").setRequired(true).setMinValue(0).setMaxValue(500)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("clearprotection")
+        .setDescription("Enable or disable protection for /clear when other members have songs in queue.")
+        .addBooleanOption((option) =>
+          option.setName("enabled").setDescription("Whether clear protection is enabled").setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("stopprotection")
+        .setDescription("Enable or disable protection for /stop when other members have songs in queue.")
+        .addBooleanOption((option) =>
+          option.setName("enabled").setDescription("Whether stop protection is enabled").setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("disconnectprotection")
+        .setDescription("Enable or disable protection for /disconnect when other members are in VC.")
+        .addBooleanOption((option) =>
+          option.setName("enabled").setDescription("Whether disconnect protection is enabled").setRequired(true)
         )
     ),
   new SlashCommandBuilder()

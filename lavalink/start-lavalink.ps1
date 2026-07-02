@@ -58,6 +58,10 @@ if (Test-Path $rootEnv) {
 
     Write-Host "YouTube source: OAuth settings loaded from .env (YOUTUBE_OAUTH_*)" -ForegroundColor DarkGray
   }
+
+  if ($env:YOUTUBE_POT_TOKEN -and $env:YOUTUBE_POT_VISITORDATA) {
+    Write-Host "YouTube source: poToken and visitorData loaded from .env (YOUTUBE_POT_*)" -ForegroundColor DarkGray
+  }
 }
 
 Write-Host "Starting local Lavalink on http://127.0.0.1:2333 with high-priority Java..." -ForegroundColor Green

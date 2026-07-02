@@ -64,7 +64,10 @@ function createDefaultGuildSettings(guildId: string): GuildSettings {
     channelSettings: {},
     memberPermissions: {},
     privateResponsesPublic: false,
-    autoDeleteBotResponses: true
+    autoDeleteBotResponses: true,
+    clearProtectionDisabled: false,
+    stopProtectionDisabled: false,
+    disconnectProtectionDisabled: false
   };
 }
 
@@ -228,6 +231,10 @@ export class MusicManager {
     return summary;
   }
 
+  getPlayer(guildId: string): GuildPlayer | undefined {
+    return this.players.get(guildId);
+  }
+
   getPrefix(guildId: string) {
     return this.getGuildSettings(guildId).prefixes[0] ?? defaultPrefix;
   }
@@ -238,13 +245,19 @@ export class MusicManager {
 
   findMatchingPrefix(guildId: string, content: string, userId?: string) {
     const premium = userId ? this.store.getPremiumUser(userId) : undefined;
-    const premiumPrefix = premium && this.isPremiumSettingsActive(premium) ? premium.personalPrefix : undefined;
+    const premiumPrefix =
+      userId && premium && (this.isBotOwnerId(userId) || this.isPremiumSettingsActive(premium))
+        ? premium.personalPrefix
+        : undefined;
     return [...this.getPrefixes(guildId), ...(premiumPrefix ? [premiumPrefix] : [])]
       .sort((left, right) => right.length - left.length)
       .find((prefix) => content.startsWith(prefix));
   }
 
   isPremiumUser(userId: string) {
+    if (this.isBotOwnerId(userId)) {
+      return true;
+    }
     const settings = this.store.getPremiumUser(userId);
     return Boolean(settings && this.isPremiumSettingsActive(settings));
   }
@@ -254,7 +267,7 @@ export class MusicManager {
   }
 
   assertPremiumOrBotManagementUser(userId: string) {
-    if (this.isPremiumUser(userId) || this.hasBotManagementAccess(userId)) {
+    if (this.isPremiumUser(userId) || this.isBotOwnerId(userId)) {
       return;
     }
 
@@ -301,12 +314,17 @@ export class MusicManager {
 
   async setPersonalPrefix(userId: string, prefix?: string) {
     const settings = this.store.getPremiumUser(userId);
-    if (!settings || !this.isPremiumSettingsActive(settings)) {
+    if (!this.isBotOwnerId(userId) && (!settings || !this.isPremiumSettingsActive(settings))) {
       throw new Error("You need premium to set a personal prefix.");
     }
 
+    const baseSettings = settings ?? {
+      userId,
+      updatedAt: new Date().toISOString()
+    };
+
     const next = {
-      ...settings,
+      ...baseSettings,
       personalPrefix: prefix ? normalizePrefixValue(prefix) : undefined,
       updatedAt: new Date().toISOString()
     };
@@ -1285,8 +1303,8 @@ export class MusicManager {
     return player.removeAbsentMembers(activeMemberIds);
   }
 
-  async massRemove(guildId: string, start: number, count: number) {
-    return this.getPlayerOrThrow(guildId).massRemove(start, count);
+  async massRemove(guildId: string, upcomingIndices: number[]) {
+    return this.getPlayerOrThrow(guildId).massRemove(upcomingIndices);
   }
 
   async shuffleQueue(guildId: string) {
@@ -1296,6 +1314,10 @@ export class MusicManager {
   async clearQueue(guildId: string) { 
     return this.getPlayerOrThrow(guildId).clearQueue(); 
   } 
+
+  async clearUserQueue(guildId: string, userId: string) {
+    return this.getPlayerOrThrow(guildId).clearUserQueue(userId);
+  }
 
   async clearAnnouncements(guildId: string, channelId?: string) {
     await this.players.get(guildId)?.clearAnnouncements(channelId);
@@ -1758,6 +1780,43 @@ export class MusicManager {
     }
 
     await this.store.setGlobalDeniedUserIds([...this.store.getGlobalDeniedUserIds(), userId]);
+  }
+
+  async shouldProtectQueue(guildId: string, member: GuildMember, command: "clear" | "stop" | "disconnect"): Promise<boolean> {
+    const settings = this.getGuildSettings(guildId);
+
+    if (command === "clear" && settings.clearProtectionDisabled) return false;
+    if (command === "stop" && settings.stopProtectionDisabled) return false;
+    if (command === "disconnect" && settings.disconnectProtectionDisabled) return false;
+
+    const isAdmin = this.hasBotManagementAccess(member.id)
+      || member.guild.ownerId === member.id
+      || member.permissions.has(PermissionFlagsBits.Administrator);
+
+    if (isAdmin) {
+      return false;
+    }
+
+    const player = this.players.get(guildId);
+    if (!player) return false;
+
+    const voiceChannelId = player.snapshot().voiceChannelId;
+    if (!voiceChannelId) return false;
+
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const channel = await guild.channels.fetch(voiceChannelId);
+      if (!channel || !("members" in channel) || !("filter" in channel.members)) return false;
+      const activeMemberIds = new Set(channel.members.filter(() => true).map((m: any) => m.id));
+
+      const hasOtherQueueTracksInVc = player.snapshot().upcoming.some(
+        (track) => track.requestedById !== member.id && activeMemberIds.has(track.requestedById)
+      );
+
+      return hasOtherQueueTracksInVc;
+    } catch {
+      return false;
+    }
   }
 
   async assertBotOwner(member: GuildMember) {
